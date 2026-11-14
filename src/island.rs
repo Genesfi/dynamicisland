@@ -18,6 +18,7 @@ pub struct TrackInfo {
     pub artist: String,
     pub is_playing: bool,
     pub thumbnail_bytes: Option<Vec<u8>>,
+    pub source: String,
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
@@ -33,6 +34,7 @@ pub struct Island {
     pub height_spring: Spring,
     pub radius_spring: Spring,
     pub alpha_spring: Spring,
+    pub y_spring: Spring,
     pub active_notification: Option<Notification>,
     pub current_track: Option<TrackInfo>,
     pub vinyl_rotation: f32,
@@ -47,6 +49,7 @@ pub struct Island {
     pub top_margin: f32,
     pub vinyl_speed: f32,
     pub compact_mode_view: crate::config::CompactDisplayMode,
+    pub compact_music_width: f32,
     pub island_style: crate::config::IslandStyle,
 }
 
@@ -66,6 +69,7 @@ impl Island {
             height_spring: Spring::new(IDLE_HEIGHT, 290.0, 24.0),
             radius_spring: Spring::new(IDLE_RADIUS, 290.0, 24.0),
             alpha_spring: Spring::new(0.0, 320.0, 26.0),
+            y_spring: Spring::new(0.0, 260.0, 22.0),
             active_notification: None,
             current_track: None,
             vinyl_rotation: 0.0,
@@ -80,6 +84,7 @@ impl Island {
             top_margin: 0.0,
             vinyl_speed: 1.0,
             compact_mode_view: crate::config::CompactDisplayMode::Combined,
+            compact_music_width: 260.0,
             island_style: crate::config::IslandStyle::SleekCapsule,
         }
     }
@@ -87,8 +92,8 @@ impl Island {
     pub fn target_idle_width(&self) -> f32 {
         if self.is_media_playing {
             match self.compact_mode_view {
-                crate::config::CompactDisplayMode::Combined => 265.0,
-                crate::config::CompactDisplayMode::TitleOnly => 220.0,
+                crate::config::CompactDisplayMode::Combined => self.compact_music_width,
+                crate::config::CompactDisplayMode::TitleOnly => (self.compact_music_width - 55.0).max(150.0),
                 crate::config::CompactDisplayMode::WaveOnly => 135.0,
             }
         } else {
@@ -147,6 +152,7 @@ impl Island {
         let moving_h = self.height_spring.update(dt);
         let moving_r = self.radius_spring.update(dt);
         let moving_a = self.alpha_spring.update(dt);
+        let moving_y = self.y_spring.update(dt);
 
         // Advance vinyl disc spin rotation & marquee running title when music is actively playing
         if self.is_media_playing {
@@ -160,13 +166,10 @@ impl Island {
         // Snappy auto-collapse when cursor leaves hover
         if !self.is_hovered {
             if self.mode == IslandMode::Expanded {
-                // When cursor leaves the expanded island, collapse quickly and smoothly!
-                if self.remaining_time > 0.25 {
-                    self.remaining_time = 0.25;
-                }
+                self.dismiss();
             }
 
-            if (self.mode == IslandMode::Expanded || self.mode == IslandMode::Slim) && self.remaining_time > 0.0 {
+            if self.mode == IslandMode::Slim && self.remaining_time > 0.0 {
                 self.remaining_time -= dt;
                 if self.remaining_time <= 0.0 {
                     self.dismiss();
@@ -183,12 +186,14 @@ impl Island {
             self.active_notification = None;
         }
 
-        if self.is_media_playing && self.mode == IslandMode::Idle {
+        if self.is_media_playing {
             self.audio_phase += dt * 7.5;
-            return true;
+            if self.audio_phase > 10000.0 {
+                self.audio_phase -= 10000.0;
+            }
         }
 
-        moving_w || moving_h || moving_r || moving_a || self.mode != IslandMode::Idle || self.is_media_playing
+        moving_w || moving_h || moving_r || moving_a || moving_y || self.mode != IslandMode::Idle || self.is_media_playing
     }
 
     /// Returns the current bounding rectangle of the island pill inside window coordinates.
@@ -196,7 +201,7 @@ impl Island {
         let cur_w = self.width_spring.current;
         let cur_h = self.height_spring.current;
         let left = (self.window_width - cur_w) * 0.5;
-        let top = self.top_margin;
+        let top = self.y_spring.current;
         let right = left + cur_w;
         let bottom = top + cur_h;
         (left, top, right, bottom)
@@ -209,10 +214,9 @@ impl Island {
 
         let (left, top, right, bottom) = self.get_pill_rect();
 
-        // Give a generous 4px tolerance around edges for smoother cursor interaction
-        local_x >= (left - 4.0)
-            && local_x <= (right + 4.0)
-            && local_y >= (top - 4.0)
-            && local_y <= (bottom + 4.0)
+        local_x >= left
+            && local_x <= right
+            && local_y >= top
+            && local_y <= bottom
     }
 }

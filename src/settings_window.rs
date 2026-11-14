@@ -25,30 +25,47 @@ use windows::{
 static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
 
 const CLIENT_WIDTH: u32 = 520;
-const CLIENT_HEIGHT: u32 = 906;
+const CLIENT_HEIGHT: u32 = 560;
 
-// Exact geometry rects (left, top, right, bottom)
-const CARD_STYLE_0: (f32, f32, f32, f32) = (20.0, 88.0, 254.0, 138.0);
-const CARD_STYLE_1: (f32, f32, f32, f32) = (266.0, 88.0, 500.0, 138.0);
-const CARD_STYLE_2: (f32, f32, f32, f32) = (20.0, 144.0, 254.0, 194.0);
-const CARD_STYLE_3: (f32, f32, f32, f32) = (266.0, 144.0, 500.0, 194.0);
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsTab {
+    Appearance,
+    Music,
+    System,
+}
 
-const CHIP_VIEW_0: (f32, f32, f32, f32) = (20.0, 226.0, 172.0, 264.0);
-const CHIP_VIEW_1: (f32, f32, f32, f32) = (178.0, 226.0, 336.0, 264.0);
-const CHIP_VIEW_2: (f32, f32, f32, f32) = (342.0, 226.0, 500.0, 264.0);
+// Tab navigation buttons
+const TAB_APPEARANCE: (f32, f32, f32, f32) = (20.0, 70.0, 172.0, 102.0);
+const TAB_MUSIC: (f32, f32, f32, f32) = (178.0, 70.0, 338.0, 102.0);
+const TAB_SYSTEM: (f32, f32, f32, f32) = (344.0, 70.0, 500.0, 102.0);
 
-const SLIDER_CARD_MARGIN: (f32, f32, f32, f32) = (20.0, 296.0, 500.0, 344.0);
-const SLIDER_CARD_TIMEOUT: (f32, f32, f32, f32) = (20.0, 350.0, 500.0, 398.0);
-const SLIDER_CARD_OPACITY: (f32, f32, f32, f32) = (20.0, 404.0, 500.0, 452.0);
-const SLIDER_CARD_GLOW: (f32, f32, f32, f32) = (20.0, 458.0, 500.0, 506.0);
-const SLIDER_CARD_VINYL_SPEED: (f32, f32, f32, f32) = (20.0, 512.0, 500.0, 560.0);
+// --- Tab 0: Appearance Coordinates ---
+const CARD_STYLE_0: (f32, f32, f32, f32) = (20.0, 134.0, 254.0, 184.0);
+const CARD_STYLE_1: (f32, f32, f32, f32) = (266.0, 134.0, 500.0, 184.0);
+const CARD_STYLE_2: (f32, f32, f32, f32) = (20.0, 190.0, 254.0, 240.0);
+const CARD_STYLE_3: (f32, f32, f32, f32) = (266.0, 190.0, 500.0, 240.0);
 
-const TOGGLE_CARD_DYNAMIC_COLOR: (f32, f32, f32, f32) = (20.0, 594.0, 500.0, 638.0);
-const TOGGLE_CARD_AUDIO_VIZ: (f32, f32, f32, f32) = (20.0, 644.0, 500.0, 688.0);
-const TOGGLE_CARD_VINYL_ANIM: (f32, f32, f32, f32) = (20.0, 694.0, 500.0, 738.0);
-const TOGGLE_CARD_HOVER_EXPAND: (f32, f32, f32, f32) = (20.0, 744.0, 500.0, 788.0);
-const TOGGLE_CARD_CLICK_THROUGH: (f32, f32, f32, f32) = (20.0, 794.0, 500.0, 838.0);
-const TOGGLE_CARD_STARTUP: (f32, f32, f32, f32) = (20.0, 844.0, 500.0, 888.0);
+const CHIP_VIEW_0: (f32, f32, f32, f32) = (20.0, 274.0, 172.0, 312.0);
+const CHIP_VIEW_1: (f32, f32, f32, f32) = (178.0, 274.0, 336.0, 312.0);
+const CHIP_VIEW_2: (f32, f32, f32, f32) = (342.0, 274.0, 500.0, 312.0);
+
+const SLIDER_CARD_MARGIN: (f32, f32, f32, f32) = (20.0, 346.0, 500.0, 394.0);
+const SLIDER_CARD_OPACITY: (f32, f32, f32, f32) = (20.0, 400.0, 500.0, 448.0);
+const SLIDER_CARD_GLOW: (f32, f32, f32, f32) = (20.0, 454.0, 500.0, 502.0);
+
+// --- Tab 1: Music & Audio Coordinates ---
+const TOGGLE_CARD_DYNAMIC_COLOR: (f32, f32, f32, f32) = (20.0, 134.0, 500.0, 178.0);
+const TOGGLE_CARD_AUDIO_VIZ: (f32, f32, f32, f32) = (20.0, 184.0, 500.0, 228.0);
+const TOGGLE_CARD_VINYL_ANIM: (f32, f32, f32, f32) = (20.0, 234.0, 500.0, 278.0);
+const TOGGLE_CARD_HOVER_EXPAND: (f32, f32, f32, f32) = (20.0, 284.0, 500.0, 328.0);
+const SLIDER_CARD_VINYL_SPEED: (f32, f32, f32, f32) = (20.0, 358.0, 500.0, 406.0);
+const SLIDER_CARD_COMPACT_WIDTH: (f32, f32, f32, f32) = (20.0, 436.0, 500.0, 484.0);
+
+// --- Tab 2: System & Behavior Coordinates ---
+const TOGGLE_CARD_STARTUP: (f32, f32, f32, f32) = (20.0, 134.0, 500.0, 180.0);
+const TOGGLE_CARD_CLICK_THROUGH: (f32, f32, f32, f32) = (20.0, 188.0, 500.0, 234.0);
+const TOGGLE_CARD_SMART_CONTOUR: (f32, f32, f32, f32) = (20.0, 242.0, 500.0, 288.0);
+const SLIDER_CARD_TIMEOUT: (f32, f32, f32, f32) = (20.0, 324.0, 500.0, 372.0);
 
 #[inline]
 fn in_rect(x: f32, y: f32, r: (f32, f32, f32, f32)) -> bool {
@@ -66,6 +83,7 @@ struct SettingsState {
 
     format_title: IDWriteTextFormat,
     format_subtitle: IDWriteTextFormat,
+    format_tab: IDWriteTextFormat,
     format_sec_title: IDWriteTextFormat,
     format_card_title: IDWriteTextFormat,
     format_card_sub: IDWriteTextFormat,
@@ -75,8 +93,8 @@ struct SettingsState {
     brush_card_hover: ID2D1SolidColorBrush,
     brush_card_border: ID2D1SolidColorBrush,
     brush_card_selected_bg: ID2D1SolidColorBrush,
+    brush_tab_active: ID2D1SolidColorBrush,
     brush_accent: ID2D1SolidColorBrush,
-    brush_accent_hover: ID2D1SolidColorBrush,
     brush_text_white: ID2D1SolidColorBrush,
     brush_text_sub: ID2D1SolidColorBrush,
     brush_toggle_on: ID2D1SolidColorBrush,
@@ -85,11 +103,14 @@ struct SettingsState {
     brush_auto_saved: ID2D1SolidColorBrush,
     brush_icon: ID2D1SolidColorBrush,
 
+    active_tab: SettingsTab,
+
     top_margin: f32,
     duration: f32,
     island_opacity: f32,
     glow_intensity: f32,
     vinyl_speed: f32,
+    compact_music_width: f32,
     island_style: IslandStyle,
     compact_view: CompactDisplayMode,
     dynamic_color: bool,
@@ -97,6 +118,8 @@ struct SettingsState {
     enable_vinyl: bool,
     hover_expand: bool,
     click_through: bool,
+    smart_contour: bool,
+    contour_nudge_y: f32,
     start_with_windows: bool,
 
     dragging_slider: Option<usize>,
@@ -113,11 +136,14 @@ impl SettingsState {
             glow_intensity: self.glow_intensity,
             vinyl_speed: self.vinyl_speed,
             compact_mode_view: self.compact_view,
+            compact_music_width: self.compact_music_width,
             dynamic_album_color: self.dynamic_color,
             enable_media_island: self.enable_media,
             enable_vinyl_animation: self.enable_vinyl,
             hover_expand_media: self.hover_expand,
             idle_click_through: self.click_through,
+            smart_contour: self.smart_contour,
+            contour_nudge_y: self.contour_nudge_y,
             start_with_windows: self.start_with_windows,
         };
         cfg.save();
@@ -143,232 +169,150 @@ impl SettingsState {
         self.d2d_target.FillRoundedRectangle(&pill, &self.brush_accent);
 
         let dot = D2D1_ELLIPSE {
-            point: pt(cx - 4.5, cy),
-            radiusX: 2.2,
-            radiusY: 2.2,
-        };
-        self.d2d_target.FillEllipse(&dot, &self.brush_text_white);
-
-        self.d2d_target.DrawLine(pt(cx + 2.0, cy), pt(cx + 6.0, cy), &self.brush_text_white, 1.5, None);
-    }
-
-    unsafe fn draw_checkmark(&self, cx: f32, cy: f32) {
-        let bg_circle = D2D1_ELLIPSE {
-            point: pt(cx, cy),
-            radiusX: 7.5,
-            radiusY: 7.5,
-        };
-        self.d2d_target.FillEllipse(&bg_circle, &self.brush_accent);
-
-        self.d2d_target.DrawLine(pt(cx - 3.8, cy + 0.2), pt(cx - 1.0, cy + 2.8), &self.brush_text_white, 1.7, None);
-        self.d2d_target.DrawLine(pt(cx - 1.0, cy + 2.8), pt(cx + 3.8, cy - 2.8), &self.brush_text_white, 1.7, None);
-    }
-
-    unsafe fn draw_style_preview_icon(&self, style: IslandStyle, cx: f32, cy: f32, is_selected: bool) {
-        let brush = if is_selected { &self.brush_accent } else { &self.brush_icon };
-        match style {
-            IslandStyle::SleekCapsule => {
-                let rect = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F { left: cx - 11.0, top: cy - 4.5, right: cx + 11.0, bottom: cy + 4.5 },
-                    radiusX: 4.5,
-                    radiusY: 4.5,
-                };
-                self.d2d_target.DrawRoundedRectangle(&rect, brush, 1.4, None);
-            }
-            IslandStyle::BalancedPill => {
-                let rect = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F { left: cx - 9.0, top: cy - 6.0, right: cx + 9.0, bottom: cy + 6.0 },
-                    radiusX: 6.0,
-                    radiusY: 6.0,
-                };
-                self.d2d_target.DrawRoundedRectangle(&rect, brush, 1.4, None);
-            }
-            IslandStyle::SpaciousCard => {
-                let rect = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F { left: cx - 10.0, top: cy - 7.5, right: cx + 10.0, bottom: cy + 7.5 },
-                    radiusX: 3.5,
-                    radiusY: 3.5,
-                };
-                self.d2d_target.DrawRoundedRectangle(&rect, brush, 1.4, None);
-            }
-            IslandStyle::CompactMinimal => {
-                let rect = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F { left: cx - 7.5, top: cy - 4.5, right: cx + 7.5, bottom: cy + 4.5 },
-                    radiusX: 4.5,
-                    radiusY: 4.5,
-                };
-                self.d2d_target.DrawRoundedRectangle(&rect, brush, 1.4, None);
-            }
-        }
-    }
-
-    unsafe fn draw_sound_wave_icon(&self, cx: f32, cy: f32, is_active: bool) {
-        let brush = if is_active { &self.brush_accent } else { &self.brush_icon };
-        let bars = [-4.5, -1.5, 1.5, 4.5];
-        let heights = [6.0, 13.0, 9.0, 5.0];
-
-        for (i, &offset_x) in bars.iter().enumerate() {
-            let h = heights[i] * 0.5;
-            self.d2d_target.DrawLine(pt(cx + offset_x, cy - h), pt(cx + offset_x, cy + h), brush, 1.7, None);
-        }
-    }
-
-    unsafe fn draw_vinyl_icon(&self, cx: f32, cy: f32, is_active: bool) {
-        let brush = if is_active { &self.brush_accent } else { &self.brush_icon };
-        let disc = D2D1_ELLIPSE {
-            point: pt(cx, cy),
-            radiusX: 7.5,
-            radiusY: 7.5,
-        };
-        self.d2d_target.DrawEllipse(&disc, brush, 1.3, None);
-
-        let groove = D2D1_ELLIPSE {
-            point: pt(cx, cy),
-            radiusX: 4.2,
-            radiusY: 4.2,
-        };
-        self.d2d_target.DrawEllipse(&groove, brush, 0.9, None);
-
-        let spindle = D2D1_ELLIPSE {
-            point: pt(cx, cy),
-            radiusX: 1.6,
-            radiusY: 1.6,
-        };
-        self.d2d_target.FillEllipse(&spindle, brush);
-
-        self.d2d_target.DrawLine(pt(cx + 6.0, cy - 7.5), pt(cx + 3.8, cy - 1.8), brush, 1.3, None);
-    }
-
-    unsafe fn draw_palette_icon(&self, cx: f32, cy: f32, is_active: bool) {
-        let brush = if is_active { &self.brush_accent } else { &self.brush_icon };
-        let circle = D2D1_ELLIPSE {
-            point: pt(cx, cy),
-            radiusX: 7.2,
-            radiusY: 7.2,
-        };
-        self.d2d_target.DrawEllipse(&circle, brush, 1.3, None);
-
-        // 3 paint dab dots
-        for (dx, dy) in [(-3.0, -2.5), (2.0, -3.2), (3.2, 1.5)] {
-            let dab = D2D1_ELLIPSE {
-                point: pt(cx + dx, cy + dy),
-                radiusX: 1.2,
-                radiusY: 1.2,
-            };
-            self.d2d_target.FillEllipse(&dab, brush);
-        }
-    }
-
-    unsafe fn draw_expand_icon(&self, cx: f32, cy: f32, is_active: bool) {
-        let brush = if is_active { &self.brush_accent } else { &self.brush_icon };
-        let center_box = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F { left: cx - 4.0, top: cy - 2.5, right: cx + 4.0, bottom: cy + 2.5 },
-            radiusX: 2.0,
-            radiusY: 2.0,
-        };
-        self.d2d_target.FillRoundedRectangle(&center_box, brush);
-
-        self.d2d_target.DrawLine(pt(cx - 7.5, cy - 4.0), pt(cx - 7.5, cy - 7.5), brush, 1.3, None);
-        self.d2d_target.DrawLine(pt(cx - 7.5, cy - 7.5), pt(cx - 4.0, cy - 7.5), brush, 1.3, None);
-
-        self.d2d_target.DrawLine(pt(cx + 7.5, cy + 4.0), pt(cx + 7.5, cy + 7.5), brush, 1.3, None);
-        self.d2d_target.DrawLine(pt(cx + 7.5, cy + 7.5), pt(cx + 4.0, cy + 7.5), brush, 1.3, None);
-    }
-
-    unsafe fn draw_click_through_icon(&self, cx: f32, cy: f32, is_active: bool) {
-        let brush = if is_active { &self.brush_accent } else { &self.brush_icon };
-        let rect = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F { left: cx - 7.5, top: cy - 6.5, right: cx + 7.5, bottom: cy + 6.5 },
+            point: windows_numerics::Vector2 { X: cx - 4.5, Y: cy },
             radiusX: 2.5,
             radiusY: 2.5,
         };
-        self.d2d_target.DrawRoundedRectangle(&rect, brush, 1.2, None);
-
-        // Arrow passing through
-        self.d2d_target.DrawLine(pt(cx - 3.5, cy - 2.5), pt(cx + 3.5, cy + 3.0), brush, 1.5, None);
-        self.d2d_target.DrawLine(pt(cx + 3.5, cy + 3.0), pt(cx + 0.5, cy + 3.0), brush, 1.4, None);
-        self.d2d_target.DrawLine(pt(cx + 3.5, cy + 3.0), pt(cx + 3.5, cy + 0.0), brush, 1.4, None);
+        self.d2d_target.FillEllipse(&dot, &self.brush_card);
     }
 
-    unsafe fn draw_slider_track(&self, rect: (f32, f32, f32, f32), norm: f32, is_dragging: bool) {
-        let track_y = rect.1 + 34.0;
-        let track_left = rect.0 + 14.0;
-        let track_right = rect.2 - 14.0;
-        let track_width = track_right - track_left;
-        let thumb_x = track_left + norm * track_width;
+    unsafe fn draw_desktop_icon(&self, cx: f32, cy: f32) {
+        let monitor = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: cx - 7.0, top: cy - 6.0, right: cx + 7.0, bottom: cy + 3.0 },
+            radiusX: 1.5,
+            radiusY: 1.5,
+        };
+        self.d2d_target.DrawRoundedRectangle(&monitor, &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx, cy + 3.0), pt(cx, cy + 6.0), &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx - 4.0, cy + 6.0), pt(cx + 4.0, cy + 6.0), &self.brush_icon, 1.4, None);
+    }
 
-        // Background track rail
-        self.brush_toggle_off.SetColor(&D2D1_COLOR_F { r: 0.16, g: 0.18, b: 0.22, a: 1.0 });
-        self.d2d_target.DrawLine(pt(track_left, track_y), pt(track_right, track_y), &self.brush_toggle_off, 4.0, None);
+    unsafe fn draw_timer_icon(&self, cx: f32, cy: f32) {
+        let clock = D2D1_ELLIPSE {
+            point: windows_numerics::Vector2 { X: cx, Y: cy },
+            radiusX: 6.5,
+            radiusY: 6.5,
+        };
+        self.d2d_target.DrawEllipse(&clock, &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx, cy), pt(cx, cy - 3.8), &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx, cy), pt(cx + 2.8, cy), &self.brush_icon, 1.4, None);
+    }
 
-        // Active highlighted rail
-        let active_brush = if is_dragging { &self.brush_accent_hover } else { &self.brush_accent };
-        if thumb_x > track_left {
-            self.d2d_target.DrawLine(pt(track_left, track_y), pt(thumb_x, track_y), active_brush, 4.0, None);
+    unsafe fn draw_palette_icon(&self, cx: f32, cy: f32) {
+        let circle = D2D1_ELLIPSE {
+            point: windows_numerics::Vector2 { X: cx, Y: cy },
+            radiusX: 6.5,
+            radiusY: 6.5,
+        };
+        self.d2d_target.DrawEllipse(&circle, &self.brush_icon, 1.4, None);
+        let dot1 = D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: cx - 2.5, Y: cy - 2.0 }, radiusX: 1.0, radiusY: 1.0 };
+        let dot2 = D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: cx + 2.5, Y: cy - 2.0 }, radiusX: 1.0, radiusY: 1.0 };
+        let dot3 = D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: cx, Y: cy + 2.5 }, radiusX: 1.0, radiusY: 1.0 };
+        self.d2d_target.FillEllipse(&dot1, &self.brush_icon);
+        self.d2d_target.FillEllipse(&dot2, &self.brush_icon);
+        self.d2d_target.FillEllipse(&dot3, &self.brush_icon);
+    }
+
+    unsafe fn draw_visualizer_icon(&self, cx: f32, cy: f32) {
+        let bars = [-4.5, -1.5, 1.5, 4.5];
+        let heights = [3.5, 6.0, 4.5, 2.5];
+        for (i, &bx) in bars.iter().enumerate() {
+            let h = heights[i];
+            self.d2d_target.DrawLine(
+                pt(cx + bx, cy - h * 0.5),
+                pt(cx + bx, cy + h * 0.5),
+                &self.brush_icon,
+                1.5,
+                None,
+            );
         }
-
-        // Thumb circle
-        let thumb_r = if is_dragging { 8.5 } else { 7.0 };
-        let thumb = D2D1_ELLIPSE {
-            point: pt(thumb_x, track_y),
-            radiusX: thumb_r,
-            radiusY: thumb_r,
-        };
-        self.d2d_target.FillEllipse(&thumb, &self.brush_text_white);
-
-        let border_brush = if is_dragging { &self.brush_accent_hover } else { &self.brush_accent };
-        self.d2d_target.DrawEllipse(&thumb, border_brush, 2.0, None);
     }
 
-    unsafe fn draw_toggle(&self, cx: f32, cy: f32, is_on: bool) {
-        let pill = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F { left: cx - 18.0, top: cy - 10.0, right: cx + 18.0, bottom: cy + 10.0 },
-            radiusX: 10.0,
-            radiusY: 10.0,
-        };
-        let (bg_brush, thumb_x) = if is_on {
-            (&self.brush_toggle_on, cx + 8.0)
-        } else {
-            (&self.brush_toggle_off, cx - 8.0)
-        };
-        self.d2d_target.FillRoundedRectangle(&pill, bg_brush);
-
-        let thumb = D2D1_ELLIPSE {
-            point: pt(thumb_x, cy),
-            radiusX: 6.8,
-            radiusY: 6.8,
-        };
-        self.d2d_target.FillEllipse(&thumb, &self.brush_text_white);
+    unsafe fn draw_vinyl_icon(&self, cx: f32, cy: f32) {
+        let outer = D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: cx, Y: cy }, radiusX: 6.5, radiusY: 6.5 };
+        let inner = D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: cx, Y: cy }, radiusX: 3.5, radiusY: 3.5 };
+        let hole = D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: cx, Y: cy }, radiusX: 1.2, radiusY: 1.2 };
+        self.d2d_target.DrawEllipse(&outer, &self.brush_icon, 1.3, None);
+        self.d2d_target.DrawEllipse(&inner, &self.brush_icon, 1.0, None);
+        self.d2d_target.FillEllipse(&hole, &self.brush_icon);
     }
 
-    unsafe fn draw_startup_icon(&self, cx: f32, cy: f32, is_on: bool) {
-        let brush = if is_on { &self.brush_accent } else { &self.brush_icon };
-        let sz = 4.5;
-        let gap = 2.0;
-        for &dx in &[-sz - gap * 0.5, gap * 0.5] {
-            for &dy in &[-sz - gap * 0.5, gap * 0.5] {
-                let tile = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F { left: cx + dx, top: cy + dy, right: cx + dx + sz, bottom: cy + dy + sz },
-                    radiusX: 1.2,
-                    radiusY: 1.2,
-                };
-                self.d2d_target.FillRoundedRectangle(&tile, brush);
-            }
-        }
+    unsafe fn draw_cursor_icon(&self, cx: f32, cy: f32) {
+        self.d2d_target.DrawLine(pt(cx - 4.5, cy - 4.5), pt(cx + 4.5, cy + 4.5), &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx + 4.5, cy + 4.5), pt(cx + 1.0, cy + 4.5), &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx + 4.5, cy + 4.5), pt(cx + 4.5, cy + 1.0), &self.brush_icon, 1.4, None);
+    }
+
+    unsafe fn draw_click_icon(&self, cx: f32, cy: f32) {
+        let box_r = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: cx - 6.5, top: cy - 6.5, right: cx + 6.5, bottom: cy + 6.5 },
+            radiusX: 1.5,
+            radiusY: 1.5,
+        };
+        self.d2d_target.DrawRoundedRectangle(&box_r, &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx - 3.0, cy - 3.0), pt(cx + 3.0, cy + 3.0), &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx + 3.0, cy + 3.0), pt(cx + 3.0, cy + 0.5), &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx + 3.0, cy + 3.0), pt(cx + 0.5, cy + 3.0), &self.brush_icon, 1.4, None);
+    }
+
+    unsafe fn draw_startup_icon(&self, cx: f32, cy: f32) {
+        let pc = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: cx - 6.5, top: cy - 6.0, right: cx + 6.5, bottom: cy + 2.5 },
+            radiusX: 1.5,
+            radiusY: 1.5,
+        };
+        self.d2d_target.DrawRoundedRectangle(&pc, &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx, cy + 2.5), pt(cx, cy + 5.5), &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx - 3.5, cy + 5.5), pt(cx + 3.5, cy + 5.5), &self.brush_icon, 1.4, None);
+        let power = D2D1_ELLIPSE {
+            point: windows_numerics::Vector2 { X: cx, Y: cy - 1.5 },
+            radiusX: 1.8,
+            radiusY: 1.8,
+        };
+        self.d2d_target.DrawEllipse(&power, &self.brush_accent, 1.2, None);
     }
 }
 
 pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
     if SETTINGS_OPEN.swap(true, Ordering::SeqCst) {
+        unsafe {
+            let class_name = w!("DynamicIslandSettingsClass");
+            if let Ok(existing_hwnd) = FindWindowW(class_name, None) {
+                if !existing_hwnd.is_invalid() {
+                    let _ = SetForegroundWindow(existing_hwnd);
+                }
+            }
+        }
         return Ok(());
     }
 
     unsafe {
-        let hinstance = GetModuleHandleW(PCWSTR::null())?;
+        let hinstance: HMODULE = GetModuleHandleW(None)?;
         let class_name = w!("DynamicIslandSettingsClass");
 
-        let icon_big = crate::icons::create_dynamic_island_icon(32).unwrap_or_default();
-        let icon_sm = crate::icons::create_dynamic_island_icon(16).unwrap_or_default();
+        let icon_h = LoadImageW(
+            Some(HINSTANCE(hinstance.0)),
+            PCWSTR(1 as *const u16),
+            IMAGE_ICON,
+            32,
+            32,
+            LR_DEFAULTCOLOR,
+        )
+        .ok()
+        .map(|h| HICON(h.0))
+        .unwrap_or_else(|| crate::icons::create_dynamic_island_icon(32).unwrap_or_default());
+
+        let icon_sm = LoadImageW(
+            Some(HINSTANCE(hinstance.0)),
+            PCWSTR(1 as *const u16),
+            IMAGE_ICON,
+            16,
+            16,
+            LR_DEFAULTCOLOR,
+        )
+        .ok()
+        .map(|h| HICON(h.0))
+        .unwrap_or_else(|| crate::icons::create_dynamic_island_icon(16).unwrap_or_default());
 
         let wnd_class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -377,7 +321,7 @@ pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
             cbClsExtra: 0,
             cbWndExtra: 0,
             hInstance: hinstance.into(),
-            hIcon: icon_big,
+            hIcon: icon_h,
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             hbrBackground: HBRUSH::default(),
             lpszMenuName: PCWSTR::null(),
@@ -387,39 +331,25 @@ pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
 
         RegisterClassExW(&wnd_class);
 
-        let mut rc = RECT {
-            left: 0,
-            top: 0,
-            right: CLIENT_WIDTH as i32,
-            bottom: CLIENT_HEIGHT as i32,
-        };
-        let _ = AdjustWindowRectEx(&mut rc, WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, false, WINDOW_EX_STYLE::default());
-
-        let outer_w = rc.right - rc.left;
-        let outer_h = rc.bottom - rc.top;
-
         let screen_w = GetSystemMetrics(SM_CXSCREEN);
         let screen_h = GetSystemMetrics(SM_CYSCREEN);
-        let pos_x = (screen_w - outer_w) / 2;
-        let pos_y = (screen_h - outer_h) / 2;
+        let pos_x = (screen_w - CLIENT_WIDTH as i32) / 2;
+        let pos_y = ((screen_h - CLIENT_HEIGHT as i32) / 2).max(40);
 
         let hwnd = CreateWindowExW(
-            WINDOW_EX_STYLE::default(),
+            WS_EX_APPWINDOW,
             class_name,
             w!("Dynamic Island Settings"),
-            WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VISIBLE,
+            WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
             pos_x,
             pos_y,
-            outer_w,
-            outer_h,
-            Some(parent_hwnd),
+            CLIENT_WIDTH as i32 + 16,
+            CLIENT_HEIGHT as i32 + 39,
+            None,
             None,
             Some(HINSTANCE(hinstance.0)),
             None,
         )?;
-
-        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(icon_big.0 as isize)));
-        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(icon_sm.0 as isize)));
 
         let dark_mode = BOOL(1);
         let _ = DwmSetWindowAttribute(
@@ -429,10 +359,11 @@ pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
             std::mem::size_of::<BOOL>() as u32,
         );
 
+        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_BIG as usize)), Some(LPARAM(icon_h.0 as isize)));
+        let _ = SendMessageW(hwnd, WM_SETICON, Some(WPARAM(ICON_SMALL as usize)), Some(LPARAM(icon_sm.0 as isize)));
+
         // Direct2D Setup
         let d2d_factory: ID2D1Factory = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?;
-        let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
-
         let render_props = D2D1_RENDER_TARGET_PROPERTIES {
             r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
             pixelFormat: D2D1_PIXEL_FORMAT {
@@ -441,103 +372,122 @@ pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
             },
             dpiX: 96.0,
             dpiY: 96.0,
-            ..Default::default()
+            usage: D2D1_RENDER_TARGET_USAGE_NONE,
+            minLevel: D2D1_FEATURE_LEVEL_DEFAULT,
         };
-
         let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
             hwnd,
-            pixelSize: D2D_SIZE_U {
+            pixelSize: windows::Win32::Graphics::Direct2D::Common::D2D_SIZE_U {
                 width: CLIENT_WIDTH,
                 height: CLIENT_HEIGHT,
             },
             presentOptions: D2D1_PRESENT_OPTIONS_IMMEDIATELY,
         };
-
         let d2d_target = d2d_factory.CreateHwndRenderTarget(&render_props, &hwnd_props)?;
 
-        // Typography
+        let dwrite_factory: IDWriteFactory = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?;
+
         let format_title = dwrite_factory.CreateTextFormat(
             w!("Segoe UI Variable Display"),
             None,
-            DWRITE_FONT_WEIGHT_BOLD,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
-            15.5,
-            w!("en-US"),
+            16.0,
+            w!("en-us"),
         )?;
+        format_title.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
 
         let format_subtitle = dwrite_factory.CreateTextFormat(
-            w!("Segoe UI Variable Text"),
+            w!("Segoe UI"),
             None,
-            DWRITE_FONT_WEIGHT_REGULAR,
+            DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
-            11.0,
-            w!("en-US"),
+            11.5,
+            w!("en-us"),
         )?;
+        format_subtitle.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
 
-        let format_sec_title = dwrite_factory.CreateTextFormat(
+        let format_tab = dwrite_factory.CreateTextFormat(
             w!("Segoe UI Variable Display"),
             None,
             DWRITE_FONT_WEIGHT_SEMI_BOLD,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
-            10.5,
-            w!("en-US"),
+            12.5,
+            w!("en-us"),
         )?;
+        format_tab.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        format_tab.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+
+        let format_sec_title = dwrite_factory.CreateTextFormat(
+            w!("Segoe UI"),
+            None,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            10.5,
+            w!("en-us"),
+        )?;
+        format_sec_title.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
 
         let format_card_title = dwrite_factory.CreateTextFormat(
-            w!("Segoe UI Variable Text"),
+            w!("Segoe UI"),
             None,
             DWRITE_FONT_WEIGHT_SEMI_BOLD,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
-            12.0,
-            w!("en-US"),
+            12.5,
+            w!("en-us"),
         )?;
+        format_card_title.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
 
         let format_card_sub = dwrite_factory.CreateTextFormat(
-            w!("Segoe UI Variable Text"),
+            w!("Segoe UI"),
             None,
-            DWRITE_FONT_WEIGHT_REGULAR,
-            DWRITE_FONT_STYLE_NORMAL,
-            DWRITE_FONT_STRETCH_NORMAL,
-            10.0,
-            w!("en-US"),
-        )?;
-
-        let format_badge = dwrite_factory.CreateTextFormat(
-            w!("Segoe UI Variable Text"),
-            None,
-            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_WEIGHT_NORMAL,
             DWRITE_FONT_STYLE_NORMAL,
             DWRITE_FONT_STRETCH_NORMAL,
             10.5,
-            w!("en-US"),
+            w!("en-us"),
         )?;
+        format_card_sub.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+
+        let format_badge = dwrite_factory.CreateTextFormat(
+            w!("Segoe UI"),
+            None,
+            DWRITE_FONT_WEIGHT_SEMI_BOLD,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            11.0,
+            w!("en-us"),
+        )?;
+        format_badge.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+        format_badge.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
 
         // Brushes
         let brush_card = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.10, g: 0.11, b: 0.13, a: 0.95 }, None)?;
         let brush_card_hover = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.14, g: 0.15, b: 0.18, a: 0.95 }, None)?;
-        let brush_card_border = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.19, g: 0.21, b: 0.25, a: 0.85 }, None)?;
-        let brush_card_selected_bg = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.05, g: 0.20, b: 0.38, a: 0.40 }, None)?;
-        let brush_accent = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 1.0 }, None)?;
-        let brush_accent_hover = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.15, g: 0.58, b: 1.0, a: 1.0 }, None)?;
+        let brush_card_border = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.22, g: 0.23, b: 0.27, a: 0.85 }, None)?;
+        let brush_card_selected_bg = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.08, g: 0.18, b: 0.32, a: 0.95 }, None)?;
+        let brush_tab_active = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 0.20 }, None)?;
+        let brush_accent = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.0, g: 0.52, b: 1.0, a: 1.0 }, None)?;
         let brush_text_white = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.96, g: 0.96, b: 0.98, a: 1.0 }, None)?;
-        let brush_text_sub = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.60, g: 0.63, b: 0.68, a: 1.0 }, None)?;
-        let brush_toggle_on = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.118, g: 0.843, b: 0.376, a: 1.0 }, None)?;
-        let brush_toggle_off = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.20, g: 0.22, b: 0.26, a: 1.0 }, None)?;
-        let brush_badge_bg = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.06, g: 0.22, b: 0.13, a: 0.85 }, None)?;
-        let brush_auto_saved = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.22, g: 0.88, b: 0.45, a: 1.0 }, None)?;
-        let brush_icon = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.50, g: 0.54, b: 0.62, a: 1.0 }, None)?;
+        let brush_text_sub = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.65, g: 0.67, b: 0.73, a: 0.90 }, None)?;
+        let brush_toggle_on = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.12, g: 0.80, b: 0.42, a: 1.0 }, None)?;
+        let brush_toggle_off = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.30, g: 0.32, b: 0.38, a: 0.90 }, None)?;
+        let brush_badge_bg = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.08, g: 0.28, b: 0.16, a: 0.50 }, None)?;
+        let brush_auto_saved = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.25, g: 0.90, b: 0.48, a: 1.0 }, None)?;
+        let brush_icon = d2d_target.CreateSolidColorBrush(&D2D1_COLOR_F { r: 0.45, g: 0.65, b: 0.95, a: 1.0 }, None)?;
 
         let cfg = AppConfig::load();
-
         let state = Box::new(SettingsState {
             parent_hwnd,
             d2d_target,
             format_title,
             format_subtitle,
+            format_tab,
             format_sec_title,
             format_card_title,
             format_card_sub,
@@ -546,8 +496,8 @@ pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
             brush_card_hover,
             brush_card_border,
             brush_card_selected_bg,
+            brush_tab_active,
             brush_accent,
-            brush_accent_hover,
             brush_text_white,
             brush_text_sub,
             brush_toggle_on,
@@ -555,11 +505,13 @@ pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
             brush_badge_bg,
             brush_auto_saved,
             brush_icon,
+            active_tab: SettingsTab::Appearance,
             top_margin: cfg.top_margin,
             duration: cfg.auto_collapse_secs,
             island_opacity: cfg.island_opacity,
             glow_intensity: cfg.glow_intensity,
             vinyl_speed: cfg.vinyl_speed,
+            compact_music_width: cfg.compact_music_width,
             island_style: cfg.island_style,
             compact_view: cfg.compact_mode_view,
             dynamic_color: cfg.dynamic_album_color,
@@ -567,6 +519,8 @@ pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
             enable_vinyl: cfg.enable_vinyl_animation,
             hover_expand: cfg.hover_expand_media,
             click_through: cfg.idle_click_through,
+            smart_contour: cfg.smart_contour,
+            contour_nudge_y: cfg.contour_nudge_y,
             start_with_windows: cfg.start_with_windows,
             dragging_slider: None,
             hovered_item: None,
@@ -608,7 +562,7 @@ unsafe extern "system" fn settings_wndproc(
                 state.d2d_target.DrawText(&title_utf, &state.format_title, &title_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
                 let sub_rect = D2D_RECT_F { left: 56.0, top: 42.0, right: 380.0, bottom: 62.0 };
-                let sub_utf: Vec<u16> = "Personalize layout, reactive visualizers, vinyl speeds & colors".encode_utf16().collect();
+                let sub_utf: Vec<u16> = "Personalize layout, reactive visualizers & behavior".encode_utf16().collect();
                 state.d2d_target.DrawText(&sub_utf, &state.format_subtitle, &sub_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
                 // Auto-saved badge
@@ -622,185 +576,434 @@ unsafe extern "system" fn settings_wndproc(
                 let badge_utf: Vec<u16> = "✓ Auto-saved".encode_utf16().collect();
                 state.d2d_target.DrawText(&badge_utf, &state.format_badge, &badge_text_rect as *const _, &state.brush_auto_saved, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-                // --- Section 1: ISLAND APPEARANCE & STYLE ---
-                let sec1_rect = D2D_RECT_F { left: 22.0, top: 68.0, right: 400.0, bottom: 84.0 };
-                let sec1_utf: Vec<u16> = "ISLAND APPEARANCE & STYLE".encode_utf16().collect();
-                state.d2d_target.DrawText(&sec1_utf, &state.format_sec_title, &sec1_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
-                let style_cards = [
-                    (CARD_STYLE_0, IslandStyle::SleekCapsule),
-                    (CARD_STYLE_1, IslandStyle::BalancedPill),
-                    (CARD_STYLE_2, IslandStyle::SpaciousCard),
-                    (CARD_STYLE_3, IslandStyle::CompactMinimal),
+                // 3. Tab Bar Navigation
+                let tabs = [
+                    (TAB_APPEARANCE, SettingsTab::Appearance, "🎨 Appearance"),
+                    (TAB_MUSIC, SettingsTab::Music, "🎵 Music & Audio"),
+                    (TAB_SYSTEM, SettingsTab::System, "⚙ System"),
                 ];
 
-                for (idx, &(rect_f, style)) in style_cards.iter().enumerate() {
-                    let is_selected = state.island_style == style;
-                    let is_hovered = state.hovered_item == Some(idx);
-
-                    let card_rect = D2D1_ROUNDED_RECT {
+                for (rect_f, tab, label) in tabs {
+                    let is_active = state.active_tab == tab;
+                    let tab_rect = D2D1_ROUNDED_RECT {
                         rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
-                        radiusX: 7.0,
-                        radiusY: 7.0,
+                        radiusX: 8.0,
+                        radiusY: 8.0,
                     };
 
-                    let bg_brush = if is_selected {
-                        &state.brush_card_selected_bg
-                    } else if is_hovered {
-                        &state.brush_card_hover
+                    if is_active {
+                        state.d2d_target.FillRoundedRectangle(&tab_rect, &state.brush_tab_active);
+                        state.d2d_target.DrawRoundedRectangle(&tab_rect, &state.brush_accent, 1.4, None);
                     } else {
-                        &state.brush_card
-                    };
-                    state.d2d_target.FillRoundedRectangle(&card_rect, bg_brush);
-
-                    let border_brush = if is_selected { &state.brush_accent } else { &state.brush_card_border };
-                    let stroke = if is_selected { 1.6 } else { 1.0 };
-                    state.d2d_target.DrawRoundedRectangle(&card_rect, border_brush, stroke, None);
-
-                    state.draw_style_preview_icon(style, rect_f.0 + 20.0, rect_f.1 + 25.0, is_selected);
-
-                    let title_r = D2D_RECT_F { left: rect_f.0 + 38.0, top: rect_f.1 + 8.0, right: rect_f.2 - 28.0, bottom: rect_f.1 + 26.0 };
-                    let t_utf: Vec<u16> = style.display_name().encode_utf16().collect();
-                    state.d2d_target.DrawText(&t_utf, &state.format_card_title, &title_r as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
-                    let sub_r = D2D_RECT_F { left: rect_f.0 + 38.0, top: rect_f.1 + 26.0, right: rect_f.2 - 8.0, bottom: rect_f.1 + 44.0 };
-                    let s_utf: Vec<u16> = style.description().encode_utf16().collect();
-                    state.d2d_target.DrawText(&s_utf, &state.format_card_sub, &sub_r as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
-                    if is_selected {
-                        state.draw_checkmark(rect_f.2 - 18.0, rect_f.1 + 18.0);
-                    }
-                }
-
-                // --- Section 2: COMPACT MUSIC DISPLAY VIEW ---
-                let sec2_rect = D2D_RECT_F { left: 22.0, top: 206.0, right: 400.0, bottom: 222.0 };
-                let sec2_utf: Vec<u16> = "COMPACT MUSIC VIEW (IDLE BAR)".encode_utf16().collect();
-                state.d2d_target.DrawText(&sec2_utf, &state.format_sec_title, &sec2_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
-                let chip_items = [
-                    (CHIP_VIEW_0, CompactDisplayMode::Combined, "Combined (Title + Wave)"),
-                    (CHIP_VIEW_1, CompactDisplayMode::TitleOnly, "Title Only"),
-                    (CHIP_VIEW_2, CompactDisplayMode::WaveOnly, "Wave Only"),
-                ];
-
-                for (idx, &(rect_f, mode, label)) in chip_items.iter().enumerate() {
-                    let is_selected = state.compact_view == mode;
-                    let is_hovered = state.hovered_item == Some(10 + idx);
-
-                    let chip_rect = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
-                        radiusX: 7.0,
-                        radiusY: 7.0,
-                    };
-
-                    let bg_brush = if is_selected {
-                        &state.brush_card_selected_bg
-                    } else if is_hovered {
-                        &state.brush_card_hover
-                    } else {
-                        &state.brush_card
-                    };
-                    state.d2d_target.FillRoundedRectangle(&chip_rect, bg_brush);
-
-                    let border_brush = if is_selected { &state.brush_accent } else { &state.brush_card_border };
-                    let stroke = if is_selected { 1.6 } else { 1.0 };
-                    state.d2d_target.DrawRoundedRectangle(&chip_rect, border_brush, stroke, None);
-
-                    let label_r = D2D_RECT_F { left: rect_f.0 + 8.0, top: rect_f.1 + 10.0, right: rect_f.2 - 8.0, bottom: rect_f.3 - 8.0 };
-                    let l_utf: Vec<u16> = label.encode_utf16().collect();
-                    let text_brush = if is_selected { &state.brush_text_white } else { &state.brush_text_sub };
-                    state.d2d_target.DrawText(&l_utf, &state.format_badge, &label_r as *const _, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-                }
-
-                // --- Section 3: FINE-TUNING SLIDERS ---
-                let sec3_rect = D2D_RECT_F { left: 22.0, top: 278.0, right: 400.0, bottom: 294.0 };
-                let sec3_utf: Vec<u16> = "FINE-TUNING CONTROLS".encode_utf16().collect();
-                state.d2d_target.DrawText(&sec3_utf, &state.format_sec_title, &sec3_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
-                let sliders = [
-                    (SLIDER_CARD_MARGIN, "Top Screen Margin", format!("{} px", state.top_margin as i32), (state.top_margin / 60.0).clamp(0.0, 1.0), 0),
-                    (SLIDER_CARD_TIMEOUT, "Notification Timeout", format!("{:.1} s", state.duration), ((state.duration - 2.0) / 13.0).clamp(0.0, 1.0), 1),
-                    (SLIDER_CARD_OPACITY, "Island Background Opacity", format!("{:.0} %", state.island_opacity * 100.0), ((state.island_opacity - 0.30) / 0.70).clamp(0.0, 1.0), 2),
-                    (SLIDER_CARD_GLOW, "Border Glow & Halo Intensity", format!("{:.0} %", state.glow_intensity * 100.0), state.glow_intensity.clamp(0.0, 1.0), 3),
-                    (SLIDER_CARD_VINYL_SPEED, "Vinyl Rotation Speed", format!("{:.1}x", state.vinyl_speed), ((state.vinyl_speed - 0.1) / 1.9).clamp(0.0, 1.0), 4),
-                ];
-
-                for (rect_f, title, val_str, norm, s_idx) in sliders {
-                    let card_rect = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
-                        radiusX: 7.0,
-                        radiusY: 7.0,
-                    };
-                    state.d2d_target.FillRoundedRectangle(&card_rect, &state.brush_card);
-                    state.d2d_target.DrawRoundedRectangle(&card_rect, &state.brush_card_border, 1.0, None);
-
-                    let t_rect = D2D_RECT_F { left: rect_f.0 + 14.0, top: rect_f.1 + 8.0, right: rect_f.2 - 90.0, bottom: rect_f.1 + 26.0 };
-                    let t_utf: Vec<u16> = title.encode_utf16().collect();
-                    state.d2d_target.DrawText(&t_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
-                    let v_rect = D2D_RECT_F { left: rect_f.2 - 80.0, top: rect_f.1 + 8.0, right: rect_f.2 - 14.0, bottom: rect_f.1 + 26.0 };
-                    let v_utf: Vec<u16> = val_str.encode_utf16().collect();
-                    state.d2d_target.DrawText(&v_utf, &state.format_badge, &v_rect as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
-                    let is_dragging = state.dragging_slider == Some(s_idx);
-                    state.draw_slider_track(rect_f, norm, is_dragging);
-                }
-
-                // --- Section 4: INTERACTIVE TOGGLES ---
-                let sec4_rect = D2D_RECT_F { left: 22.0, top: 574.0, right: 400.0, bottom: 590.0 };
-                let sec4_utf: Vec<u16> = "BEHAVIOR & ANIMATION".encode_utf16().collect();
-                state.d2d_target.DrawText(&sec4_utf, &state.format_sec_title, &sec4_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
-                let toggles = [
-                    (TOGGLE_CARD_DYNAMIC_COLOR, "Dynamic Album Color Accent", "Tint border, halo glow & waves adaptively by album cover", state.dynamic_color, 20),
-                    (TOGGLE_CARD_AUDIO_VIZ, "Real-time Audio Visualizer (WASAPI)", "Reactive equalizer waves driven by active PC speaker sound", state.enable_media, 21),
-                    (TOGGLE_CARD_VINYL_ANIM, "Spinning Vinyl Disc Animation", "Rotating vinyl record & album artwork cover during music playback", state.enable_vinyl, 22),
-                    (TOGGLE_CARD_HOVER_EXPAND, "Hover to Expand Media", "Smoothly expand compact island into full controls when cursor hovers", state.hover_expand, 23),
-                    (TOGGLE_CARD_CLICK_THROUGH, "Idle Click-Through", "Pass mouse clicks directly to browser tabs and windows underneath", state.click_through, 24),
-                    (TOGGLE_CARD_STARTUP, "Start with Windows", "Launch Dynamic Island automatically when system boots", state.start_with_windows, 25),
-                ];
-
-                for (rect_f, title, desc, is_on, t_idx) in toggles {
-                    let is_hovered = state.hovered_item == Some(t_idx);
-                    let card_rect = D2D1_ROUNDED_RECT {
-                        rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
-                        radiusX: 7.0,
-                        radiusY: 7.0,
-                    };
-                    let bg_brush = if is_hovered { &state.brush_card_hover } else { &state.brush_card };
-                    state.d2d_target.FillRoundedRectangle(&card_rect, bg_brush);
-                    state.d2d_target.DrawRoundedRectangle(&card_rect, &state.brush_card_border, 1.0, None);
-
-                    let icon_cx = rect_f.0 + 20.0;
-                    let icon_cy = (rect_f.1 + rect_f.3) * 0.5;
-
-                    match t_idx {
-                        20 => state.draw_palette_icon(icon_cx, icon_cy, is_on),
-                        21 => state.draw_sound_wave_icon(icon_cx, icon_cy, is_on),
-                        22 => state.draw_vinyl_icon(icon_cx, icon_cy, is_on),
-                        23 => state.draw_expand_icon(icon_cx, icon_cy, is_on),
-                        24 => state.draw_click_through_icon(icon_cx, icon_cy, is_on),
-                        25 => state.draw_startup_icon(icon_cx, icon_cy, is_on),
-                        _ => {}
+                        state.d2d_target.FillRoundedRectangle(&tab_rect, &state.brush_card);
+                        state.d2d_target.DrawRoundedRectangle(&tab_rect, &state.brush_card_border, 1.0, None);
                     }
 
-                    let t_rect = D2D_RECT_F { left: rect_f.0 + 38.0, top: rect_f.1 + 6.0, right: rect_f.2 - 58.0, bottom: rect_f.1 + 24.0 };
-                    let t_utf: Vec<u16> = title.encode_utf16().collect();
-                    state.d2d_target.DrawText(&t_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    let text_brush = if is_active { &state.brush_accent } else { &state.brush_text_sub };
+                    let lbl_utf: Vec<u16> = label.encode_utf16().collect();
+                    let text_rect = D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 };
+                    state.d2d_target.DrawText(&lbl_utf, &state.format_tab, &text_rect as *const _, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                }
 
-                    let d_rect = D2D_RECT_F { left: rect_f.0 + 38.0, top: rect_f.1 + 24.0, right: rect_f.2 - 58.0, bottom: rect_f.1 + 40.0 };
-                    let d_utf: Vec<u16> = desc.encode_utf16().collect();
-                    state.d2d_target.DrawText(&d_utf, &state.format_card_sub, &d_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                // 4. Tab Contents
+                match state.active_tab {
+                    SettingsTab::Appearance => {
+                        // Section 1: ISLAND APPEARANCE & STYLE
+                        let sec1_rect = D2D_RECT_F { left: 22.0, top: 114.0, right: 400.0, bottom: 130.0 };
+                        let sec1_utf: Vec<u16> = "ISLAND APPEARANCE & STYLE".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec1_utf, &state.format_sec_title, &sec1_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-                    state.draw_toggle(rect_f.2 - 28.0, (rect_f.1 + rect_f.3) * 0.5, is_on);
+                        let style_cards = [
+                            (CARD_STYLE_0, IslandStyle::SleekCapsule),
+                            (CARD_STYLE_1, IslandStyle::BalancedPill),
+                            (CARD_STYLE_2, IslandStyle::SpaciousCard),
+                            (CARD_STYLE_3, IslandStyle::CompactMinimal),
+                        ];
+
+                        for (idx, &(rect_f, style)) in style_cards.iter().enumerate() {
+                            let is_selected = state.island_style == style;
+                            let is_hovered = state.hovered_item == Some(idx);
+
+                            let card_rect = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
+                                radiusX: 7.0,
+                                radiusY: 7.0,
+                            };
+
+                            let bg_brush = if is_selected {
+                                &state.brush_card_selected_bg
+                            } else if is_hovered {
+                                &state.brush_card_hover
+                            } else {
+                                &state.brush_card
+                            };
+                            state.d2d_target.FillRoundedRectangle(&card_rect, bg_brush);
+
+                            let border_brush = if is_selected { &state.brush_accent } else { &state.brush_card_border };
+                            state.d2d_target.DrawRoundedRectangle(&card_rect, border_brush, if is_selected { 1.6 } else { 1.0 }, None);
+
+                            let name_utf: Vec<u16> = style.display_name().encode_utf16().collect();
+                            let desc_utf: Vec<u16> = style.description().encode_utf16().collect();
+                            let t_rect = D2D_RECT_F { left: rect_f.0 + 36.0, top: rect_f.1 + 8.0, right: rect_f.2 - 30.0, bottom: rect_f.1 + 26.0 };
+                            let d_rect = D2D_RECT_F { left: rect_f.0 + 36.0, top: rect_f.1 + 27.0, right: rect_f.2 - 10.0, bottom: rect_f.1 + 43.0 };
+
+                            state.d2d_target.DrawText(&name_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                            state.d2d_target.DrawText(&desc_utf, &state.format_card_sub, &d_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                            // Pill preview icon on left of card
+                            let icon_r = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: rect_f.0 + 12.0, top: rect_f.1 + 19.0, right: rect_f.0 + 28.0, bottom: rect_f.1 + 29.0 },
+                                radiusX: 5.0,
+                                radiusY: 5.0,
+                            };
+                            state.d2d_target.DrawRoundedRectangle(&icon_r, border_brush, 1.2, None);
+
+                            if is_selected {
+                                let check_cx = rect_f.2 - 18.0;
+                                let check_cy = rect_f.1 + 18.0;
+                                let dot = D2D1_ELLIPSE {
+                                    point: windows_numerics::Vector2 { X: check_cx, Y: check_cy },
+                                    radiusX: 7.0,
+                                    radiusY: 7.0,
+                                };
+                                state.d2d_target.FillEllipse(&dot, &state.brush_accent);
+                                state.d2d_target.DrawLine(pt(check_cx - 3.0, check_cy), pt(check_cx - 1.0, check_cy + 2.5), &state.brush_text_white, 1.5, None);
+                                state.d2d_target.DrawLine(pt(check_cx - 1.0, check_cy + 2.5), pt(check_cx + 3.5, check_cy - 2.5), &state.brush_text_white, 1.5, None);
+                            }
+                        }
+
+                        // Section 2: COMPACT MUSIC VIEW (IDLE BAR)
+                        let sec2_rect = D2D_RECT_F { left: 22.0, top: 254.0, right: 400.0, bottom: 270.0 };
+                        let sec2_utf: Vec<u16> = "COMPACT MUSIC VIEW (IDLE BAR)".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec2_utf, &state.format_sec_title, &sec2_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let chips = [
+                            (CHIP_VIEW_0, CompactDisplayMode::Combined, "Combined (Title + Wave)"),
+                            (CHIP_VIEW_1, CompactDisplayMode::TitleOnly, "Title Only"),
+                            (CHIP_VIEW_2, CompactDisplayMode::WaveOnly, "Wave Only"),
+                        ];
+
+                        for &(rect_f, mode, label) in &chips {
+                            let is_selected = state.compact_view == mode;
+                            let card_rect = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
+                                radiusX: 6.0,
+                                radiusY: 6.0,
+                            };
+                            let bg_brush = if is_selected { &state.brush_card_selected_bg } else { &state.brush_card };
+                            state.d2d_target.FillRoundedRectangle(&card_rect, bg_brush);
+                            let border_brush = if is_selected { &state.brush_accent } else { &state.brush_card_border };
+                            state.d2d_target.DrawRoundedRectangle(&card_rect, border_brush, if is_selected { 1.5 } else { 1.0 }, None);
+
+                            let text_brush = if is_selected { &state.brush_text_white } else { &state.brush_text_sub };
+                            let lbl_utf: Vec<u16> = label.encode_utf16().collect();
+                            let text_rect = D2D_RECT_F { left: rect_f.0 + 8.0, top: rect_f.1 + 8.0, right: rect_f.2 - 8.0, bottom: rect_f.3 - 8.0 };
+                            state.d2d_target.DrawText(&lbl_utf, &state.format_card_sub, &text_rect as *const _, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                        }
+
+                        // Section 3: FINE-TUNING SLIDERS
+                        let sec3_rect = D2D_RECT_F { left: 22.0, top: 326.0, right: 400.0, bottom: 342.0 };
+                        let sec3_utf: Vec<u16> = "FINE-TUNING CONTROLS".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec3_utf, &state.format_sec_title, &sec3_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let sliders = [
+                            (SLIDER_CARD_MARGIN, "Top Screen Margin", format!("{} px", state.top_margin as i32), (state.top_margin / 60.0).clamp(0.0, 1.0), 0),
+                            (SLIDER_CARD_OPACITY, "Island Background Opacity", format!("{:.0} %", state.island_opacity * 100.0), ((state.island_opacity - 0.30) / 0.70).clamp(0.0, 1.0), 2),
+                            (SLIDER_CARD_GLOW, "Border Glow & Halo Intensity", format!("{:.0} %", state.glow_intensity * 100.0), state.glow_intensity.clamp(0.0, 1.0), 3),
+                        ];
+
+                        for (rect_f, title, val_str, norm, s_idx) in sliders {
+                            let card_rect = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
+                                radiusX: 7.0,
+                                radiusY: 7.0,
+                            };
+                            state.d2d_target.FillRoundedRectangle(&card_rect, &state.brush_card);
+                            state.d2d_target.DrawRoundedRectangle(&card_rect, &state.brush_card_border, 1.0, None);
+
+                            let icon_cx = rect_f.0 + 22.0;
+                            let icon_cy = rect_f.1 + 19.0;
+                            match s_idx {
+                                0 => state.draw_desktop_icon(icon_cx, icon_cy),
+                                2 => state.draw_palette_icon(icon_cx, icon_cy),
+                                3 => state.draw_palette_icon(icon_cx, icon_cy),
+                                _ => {}
+                            }
+
+                            let title_utf: Vec<u16> = title.encode_utf16().collect();
+                            let t_rect = D2D_RECT_F { left: rect_f.0 + 38.0, top: rect_f.1 + 8.0, right: rect_f.2 - 80.0, bottom: rect_f.1 + 26.0 };
+                            state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                            let val_utf: Vec<u16> = val_str.encode_utf16().collect();
+                            let v_rect = D2D_RECT_F { left: rect_f.2 - 90.0, top: rect_f.1 + 8.0, right: rect_f.2 - 14.0, bottom: rect_f.1 + 26.0 };
+                            state.d2d_target.DrawText(&val_utf, &state.format_badge, &v_rect as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                            let track_y = rect_f.1 + 35.0;
+                            let track_x1 = rect_f.0 + 14.0;
+                            let track_x2 = rect_f.2 - 14.0;
+
+                            state.d2d_target.DrawLine(pt(track_x1, track_y), pt(track_x2, track_y), &state.brush_card_border, 3.5, None);
+                            let fill_x = track_x1 + norm * (track_x2 - track_x1);
+                            state.d2d_target.DrawLine(pt(track_x1, track_y), pt(fill_x, track_y), &state.brush_accent, 3.5, None);
+
+                            let thumb = D2D1_ELLIPSE {
+                                point: windows_numerics::Vector2 { X: fill_x, Y: track_y },
+                                radiusX: 6.5,
+                                radiusY: 6.5,
+                            };
+                            state.d2d_target.FillEllipse(&thumb, &state.brush_text_white);
+                        }
+                    }
+
+                    SettingsTab::Music => {
+                        // Section 1: MUSIC PLAYBACK & VISUALIZER
+                        let sec1_rect = D2D_RECT_F { left: 22.0, top: 114.0, right: 400.0, bottom: 130.0 };
+                        let sec1_utf: Vec<u16> = "MUSIC PLAYBACK & VISUALIZER".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec1_utf, &state.format_sec_title, &sec1_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let toggles = [
+                            (TOGGLE_CARD_DYNAMIC_COLOR, "Dynamic Album Color Accent", "Tint border, halo glow & waveform adaptively by album art", state.dynamic_color, 0),
+                            (TOGGLE_CARD_AUDIO_VIZ, "Real-time Audio Visualizer (WASAPI)", "Reactive symmetric waveform driven by PC speaker sound", state.enable_media, 1),
+                            (TOGGLE_CARD_VINYL_ANIM, "Spinning Vinyl Disc Animation", "Rotating vinyl record & album cover artwork during playback", state.enable_vinyl, 2),
+                            (TOGGLE_CARD_HOVER_EXPAND, "Hover to Expand Media", "Smoothly expand compact island into full controls when hovered", state.hover_expand, 3),
+                        ];
+
+                        for (rect_f, title, desc, is_on, t_idx) in toggles {
+                            let card_rect = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
+                                radiusX: 7.0,
+                                radiusY: 7.0,
+                            };
+                            state.d2d_target.FillRoundedRectangle(&card_rect, &state.brush_card);
+                            state.d2d_target.DrawRoundedRectangle(&card_rect, &state.brush_card_border, 1.0, None);
+
+                            let icon_cx = rect_f.0 + 22.0;
+                            let icon_cy = (rect_f.1 + rect_f.3) * 0.5;
+                            match t_idx {
+                                0 => state.draw_palette_icon(icon_cx, icon_cy),
+                                1 => state.draw_visualizer_icon(icon_cx, icon_cy),
+                                2 => state.draw_vinyl_icon(icon_cx, icon_cy),
+                                3 => state.draw_cursor_icon(icon_cx, icon_cy),
+                                _ => {}
+                            }
+
+                            let title_utf: Vec<u16> = title.encode_utf16().collect();
+                            let t_rect = D2D_RECT_F { left: rect_f.0 + 38.0, top: rect_f.1 + 6.0, right: rect_f.2 - 60.0, bottom: rect_f.1 + 24.0 };
+                            state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                            let desc_utf: Vec<u16> = desc.encode_utf16().collect();
+                            let d_rect = D2D_RECT_F { left: rect_f.0 + 38.0, top: rect_f.1 + 24.0, right: rect_f.2 - 60.0, bottom: rect_f.3 - 4.0 };
+                            state.d2d_target.DrawText(&desc_utf, &state.format_card_sub, &d_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                            // Toggle Switch pill
+                            let sw_r = rect_f.2 - 16.0;
+                            let sw_l = sw_r - 36.0;
+                            let sw_cy = (rect_f.1 + rect_f.3) * 0.5;
+                            let sw_pill = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: sw_l, top: sw_cy - 10.0, right: sw_r, bottom: sw_cy + 10.0 },
+                                radiusX: 10.0,
+                                radiusY: 10.0,
+                            };
+                            let sw_brush = if is_on { &state.brush_toggle_on } else { &state.brush_toggle_off };
+                            state.d2d_target.FillRoundedRectangle(&sw_pill, sw_brush);
+
+                            let thumb_x = if is_on { sw_r - 10.0 } else { sw_l + 10.0 };
+                            let sw_thumb = D2D1_ELLIPSE {
+                                point: windows_numerics::Vector2 { X: thumb_x, Y: sw_cy },
+                                radiusX: 7.5,
+                                radiusY: 7.5,
+                            };
+                            state.d2d_target.FillEllipse(&sw_thumb, &state.brush_text_white);
+                        }
+
+                        // Section 2: VINYL ROTATION SPEED
+                        let sec2_rect = D2D_RECT_F { left: 22.0, top: 344.0, right: 400.0, bottom: 360.0 };
+                        let sec2_utf: Vec<u16> = "VINYL ROTATION SPEED".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec2_utf, &state.format_sec_title, &sec2_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let card_rect = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: SLIDER_CARD_VINYL_SPEED.0, top: SLIDER_CARD_VINYL_SPEED.1, right: SLIDER_CARD_VINYL_SPEED.2, bottom: SLIDER_CARD_VINYL_SPEED.3 },
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        state.d2d_target.FillRoundedRectangle(&card_rect, &state.brush_card);
+                        state.d2d_target.DrawRoundedRectangle(&card_rect, &state.brush_card_border, 1.0, None);
+
+                        state.draw_vinyl_icon(SLIDER_CARD_VINYL_SPEED.0 + 22.0, SLIDER_CARD_VINYL_SPEED.1 + 19.0);
+
+                        let title_utf: Vec<u16> = "Rotation Rate (0.1x - 2.0x)".encode_utf16().collect();
+                        let t_rect = D2D_RECT_F { left: SLIDER_CARD_VINYL_SPEED.0 + 38.0, top: SLIDER_CARD_VINYL_SPEED.1 + 8.0, right: SLIDER_CARD_VINYL_SPEED.2 - 80.0, bottom: SLIDER_CARD_VINYL_SPEED.1 + 26.0 };
+                        state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let val_str = format!("{:.1}x", state.vinyl_speed);
+                        let val_utf: Vec<u16> = val_str.encode_utf16().collect();
+                        let v_rect = D2D_RECT_F { left: SLIDER_CARD_VINYL_SPEED.2 - 90.0, top: SLIDER_CARD_VINYL_SPEED.1 + 8.0, right: SLIDER_CARD_VINYL_SPEED.2 - 14.0, bottom: SLIDER_CARD_VINYL_SPEED.1 + 26.0 };
+                        state.d2d_target.DrawText(&val_utf, &state.format_badge, &v_rect as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let norm = ((state.vinyl_speed - 0.1) / 1.9).clamp(0.0, 1.0);
+                        let track_y = SLIDER_CARD_VINYL_SPEED.1 + 35.0;
+                        let track_x1 = SLIDER_CARD_VINYL_SPEED.0 + 14.0;
+                        let track_x2 = SLIDER_CARD_VINYL_SPEED.2 - 14.0;
+
+                        state.d2d_target.DrawLine(pt(track_x1, track_y), pt(track_x2, track_y), &state.brush_card_border, 3.5, None);
+                        let fill_x = track_x1 + norm * (track_x2 - track_x1);
+                        state.d2d_target.DrawLine(pt(track_x1, track_y), pt(fill_x, track_y), &state.brush_accent, 3.5, None);
+
+                        let thumb = D2D1_ELLIPSE {
+                            point: windows_numerics::Vector2 { X: fill_x, Y: track_y },
+                            radiusX: 6.5,
+                            radiusY: 6.5,
+                        };
+                        state.d2d_target.FillEllipse(&thumb, &state.brush_text_white);
+
+                        // Section 3: COMPACT MUSIC PILL WIDTH
+                        let sec3_rect = D2D_RECT_F { left: 22.0, top: 418.0, right: 400.0, bottom: 434.0 };
+                        let sec3_utf: Vec<u16> = "COMPACT MUSIC PILL WIDTH (IDLE)".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec3_utf, &state.format_sec_title, &sec3_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let card_rect = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: SLIDER_CARD_COMPACT_WIDTH.0, top: SLIDER_CARD_COMPACT_WIDTH.1, right: SLIDER_CARD_COMPACT_WIDTH.2, bottom: SLIDER_CARD_COMPACT_WIDTH.3 },
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        state.d2d_target.FillRoundedRectangle(&card_rect, &state.brush_card);
+                        state.d2d_target.DrawRoundedRectangle(&card_rect, &state.brush_card_border, 1.0, None);
+
+                        state.draw_desktop_icon(SLIDER_CARD_COMPACT_WIDTH.0 + 22.0, SLIDER_CARD_COMPACT_WIDTH.1 + 19.0);
+
+                        let title_utf: Vec<u16> = "Capsule Width (160px - 420px)".encode_utf16().collect();
+                        let t_rect = D2D_RECT_F { left: SLIDER_CARD_COMPACT_WIDTH.0 + 38.0, top: SLIDER_CARD_COMPACT_WIDTH.1 + 8.0, right: SLIDER_CARD_COMPACT_WIDTH.2 - 80.0, bottom: SLIDER_CARD_COMPACT_WIDTH.1 + 26.0 };
+                        state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let val_str = format!("{:.0} px", state.compact_music_width);
+                        let val_utf: Vec<u16> = val_str.encode_utf16().collect();
+                        let v_rect = D2D_RECT_F { left: SLIDER_CARD_COMPACT_WIDTH.2 - 90.0, top: SLIDER_CARD_COMPACT_WIDTH.1 + 8.0, right: SLIDER_CARD_COMPACT_WIDTH.2 - 14.0, bottom: SLIDER_CARD_COMPACT_WIDTH.1 + 26.0 };
+                        state.d2d_target.DrawText(&val_utf, &state.format_badge, &v_rect as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let norm = ((state.compact_music_width - 160.0) / 260.0).clamp(0.0, 1.0);
+                        let track_y = SLIDER_CARD_COMPACT_WIDTH.1 + 35.0;
+                        let track_x1 = SLIDER_CARD_COMPACT_WIDTH.0 + 14.0;
+                        let track_x2 = SLIDER_CARD_COMPACT_WIDTH.2 - 14.0;
+
+                        state.d2d_target.DrawLine(pt(track_x1, track_y), pt(track_x2, track_y), &state.brush_card_border, 3.5, None);
+                        let fill_x = track_x1 + norm * (track_x2 - track_x1);
+                        state.d2d_target.DrawLine(pt(track_x1, track_y), pt(fill_x, track_y), &state.brush_accent, 3.5, None);
+
+                        let thumb = D2D1_ELLIPSE {
+                            point: windows_numerics::Vector2 { X: fill_x, Y: track_y },
+                            radiusX: 6.5,
+                            radiusY: 6.5,
+                        };
+                        state.d2d_target.FillEllipse(&thumb, &state.brush_text_white);
+                    }
+
+                    SettingsTab::System => {
+                        // Section 1: SYSTEM INTEGRATION
+                        let sec1_rect = D2D_RECT_F { left: 22.0, top: 114.0, right: 400.0, bottom: 130.0 };
+                        let sec1_utf: Vec<u16> = "SYSTEM INTEGRATION & INPUT".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec1_utf, &state.format_sec_title, &sec1_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let toggles = [
+                            (TOGGLE_CARD_STARTUP, "Start with Windows", "Launch Dynamic Island automatically when system boots up", state.start_with_windows, 0),
+                            (TOGGLE_CARD_CLICK_THROUGH, "Idle Click-Through", "Pass mouse clicks directly to browser tabs and windows underneath", state.click_through, 1),
+                            (TOGGLE_CARD_SMART_CONTOUR, "Smart Contour (Dynamic Avoidance)", "Auto-glides island down to prevent obstructing browser tabs & active text", state.smart_contour, 2),
+                        ];
+
+                        for (rect_f, title, desc, is_on, t_idx) in toggles {
+                            let card_rect = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
+                                radiusX: 7.0,
+                                radiusY: 7.0,
+                            };
+                            state.d2d_target.FillRoundedRectangle(&card_rect, &state.brush_card);
+                            state.d2d_target.DrawRoundedRectangle(&card_rect, &state.brush_card_border, 1.0, None);
+
+                            let icon_cx = rect_f.0 + 22.0;
+                            let icon_cy = (rect_f.1 + rect_f.3) * 0.5;
+                            match t_idx {
+                                0 => state.draw_startup_icon(icon_cx, icon_cy),
+                                1 => state.draw_click_icon(icon_cx, icon_cy),
+                                2 => state.draw_click_icon(icon_cx, icon_cy),
+                                _ => {}
+                            }
+
+                            let title_utf: Vec<u16> = title.encode_utf16().collect();
+                            let t_rect = D2D_RECT_F { left: rect_f.0 + 38.0, top: rect_f.1 + 6.0, right: rect_f.2 - 60.0, bottom: rect_f.1 + 24.0 };
+                            state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                            let desc_utf: Vec<u16> = desc.encode_utf16().collect();
+                            let d_rect = D2D_RECT_F { left: rect_f.0 + 38.0, top: rect_f.1 + 24.0, right: rect_f.2 - 60.0, bottom: rect_f.3 - 4.0 };
+                            state.d2d_target.DrawText(&desc_utf, &state.format_card_sub, &d_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                            // Toggle Switch pill
+                            let sw_r = rect_f.2 - 16.0;
+                            let sw_l = sw_r - 36.0;
+                            let sw_cy = (rect_f.1 + rect_f.3) * 0.5;
+                            let sw_pill = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: sw_l, top: sw_cy - 10.0, right: sw_r, bottom: sw_cy + 10.0 },
+                                radiusX: 10.0,
+                                radiusY: 10.0,
+                            };
+                            let sw_brush = if is_on { &state.brush_toggle_on } else { &state.brush_toggle_off };
+                            state.d2d_target.FillRoundedRectangle(&sw_pill, sw_brush);
+
+                            let thumb_x = if is_on { sw_r - 10.0 } else { sw_l + 10.0 };
+                            let sw_thumb = D2D1_ELLIPSE {
+                                point: windows_numerics::Vector2 { X: thumb_x, Y: sw_cy },
+                                radiusX: 7.5,
+                                radiusY: 7.5,
+                            };
+                            state.d2d_target.FillEllipse(&sw_thumb, &state.brush_text_white);
+                        }
+
+                        // Section 2: NOTIFICATION TIMEOUT
+                        let sec2_rect = D2D_RECT_F { left: 22.0, top: 304.0, right: 400.0, bottom: 320.0 };
+                        let sec2_utf: Vec<u16> = "NOTIFICATION DISPLAY DURATION".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec2_utf, &state.format_sec_title, &sec2_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let card_rect = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: SLIDER_CARD_TIMEOUT.0, top: SLIDER_CARD_TIMEOUT.1, right: SLIDER_CARD_TIMEOUT.2, bottom: SLIDER_CARD_TIMEOUT.3 },
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        state.d2d_target.FillRoundedRectangle(&card_rect, &state.brush_card);
+                        state.d2d_target.DrawRoundedRectangle(&card_rect, &state.brush_card_border, 1.0, None);
+
+                        state.draw_timer_icon(SLIDER_CARD_TIMEOUT.0 + 22.0, SLIDER_CARD_TIMEOUT.1 + 19.0);
+
+                        let title_utf: Vec<u16> = "Auto-Collapse Timeout".encode_utf16().collect();
+                        let t_rect = D2D_RECT_F { left: SLIDER_CARD_TIMEOUT.0 + 38.0, top: SLIDER_CARD_TIMEOUT.1 + 8.0, right: SLIDER_CARD_TIMEOUT.2 - 80.0, bottom: SLIDER_CARD_TIMEOUT.1 + 26.0 };
+                        state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let val_str = format!("{:.1} s", state.duration);
+                        let val_utf: Vec<u16> = val_str.encode_utf16().collect();
+                        let v_rect = D2D_RECT_F { left: SLIDER_CARD_TIMEOUT.2 - 90.0, top: SLIDER_CARD_TIMEOUT.1 + 8.0, right: SLIDER_CARD_TIMEOUT.2 - 14.0, bottom: SLIDER_CARD_TIMEOUT.1 + 26.0 };
+                        state.d2d_target.DrawText(&val_utf, &state.format_badge, &v_rect as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let norm = ((state.duration - 2.0) / 13.0).clamp(0.0, 1.0);
+                        let track_y = SLIDER_CARD_TIMEOUT.1 + 35.0;
+                        let track_x1 = SLIDER_CARD_TIMEOUT.0 + 14.0;
+                        let track_x2 = SLIDER_CARD_TIMEOUT.2 - 14.0;
+
+                        state.d2d_target.DrawLine(pt(track_x1, track_y), pt(track_x2, track_y), &state.brush_card_border, 3.5, None);
+                        let fill_x = track_x1 + norm * (track_x2 - track_x1);
+                        state.d2d_target.DrawLine(pt(track_x1, track_y), pt(fill_x, track_y), &state.brush_accent, 3.5, None);
+
+                        let thumb = D2D1_ELLIPSE {
+                            point: windows_numerics::Vector2 { X: fill_x, Y: track_y },
+                            radiusX: 6.5,
+                            radiusY: 6.5,
+                        };
+                        state.d2d_target.FillEllipse(&thumb, &state.brush_text_white);
+                    }
                 }
 
                 let _ = state.d2d_target.EndDraw(None, None);
             }
-
             let _ = EndPaint(hwnd, &ps);
             LRESULT(0)
         }
+
         WM_LBUTTONDOWN => {
             let x = (lparam.0 & 0xFFFF) as i16 as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
@@ -809,88 +1012,130 @@ unsafe extern "system" fn settings_wndproc(
             if !state_ptr.is_null() {
                 let state = &mut *state_ptr;
 
-                // 1. Style Selection
-                if in_rect(x, y, CARD_STYLE_0) {
-                    state.island_style = IslandStyle::SleekCapsule;
-                    state.auto_save();
-                } else if in_rect(x, y, CARD_STYLE_1) {
-                    state.island_style = IslandStyle::BalancedPill;
-                    state.auto_save();
-                } else if in_rect(x, y, CARD_STYLE_2) {
-                    state.island_style = IslandStyle::SpaciousCard;
-                    state.auto_save();
-                } else if in_rect(x, y, CARD_STYLE_3) {
-                    state.island_style = IslandStyle::CompactMinimal;
-                    state.auto_save();
+                // 1. Tab switches
+                if in_rect(x, y, TAB_APPEARANCE) {
+                    state.active_tab = SettingsTab::Appearance;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return LRESULT(0);
+                } else if in_rect(x, y, TAB_MUSIC) {
+                    state.active_tab = SettingsTab::Music;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return LRESULT(0);
+                } else if in_rect(x, y, TAB_SYSTEM) {
+                    state.active_tab = SettingsTab::System;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return LRESULT(0);
                 }
-                // 2. Compact View Chip Selection
-                else if in_rect(x, y, CHIP_VIEW_0) {
-                    state.compact_view = CompactDisplayMode::Combined;
-                    state.auto_save();
-                } else if in_rect(x, y, CHIP_VIEW_1) {
-                    state.compact_view = CompactDisplayMode::TitleOnly;
-                    state.auto_save();
-                } else if in_rect(x, y, CHIP_VIEW_2) {
-                    state.compact_view = CompactDisplayMode::WaveOnly;
-                    state.auto_save();
-                }
-                // 3. Sliders Drag Start
-                else if in_rect(x, y, SLIDER_CARD_MARGIN) {
-                    state.dragging_slider = Some(0);
-                    let norm = ((x - (SLIDER_CARD_MARGIN.0 + 14.0)) / (SLIDER_CARD_MARGIN.2 - SLIDER_CARD_MARGIN.0 - 28.0)).clamp(0.0, 1.0);
-                    state.top_margin = (norm * 60.0).round();
-                    state.auto_save();
-                    SetCapture(hwnd);
-                } else if in_rect(x, y, SLIDER_CARD_TIMEOUT) {
-                    state.dragging_slider = Some(1);
-                    let norm = ((x - (SLIDER_CARD_TIMEOUT.0 + 14.0)) / (SLIDER_CARD_TIMEOUT.2 - SLIDER_CARD_TIMEOUT.0 - 28.0)).clamp(0.0, 1.0);
-                    state.duration = ((2.0 + norm * 13.0) * 10.0).round() / 10.0;
-                    state.auto_save();
-                    SetCapture(hwnd);
-                } else if in_rect(x, y, SLIDER_CARD_OPACITY) {
-                    state.dragging_slider = Some(2);
-                    let norm = ((x - (SLIDER_CARD_OPACITY.0 + 14.0)) / (SLIDER_CARD_OPACITY.2 - SLIDER_CARD_OPACITY.0 - 28.0)).clamp(0.0, 1.0);
-                    state.island_opacity = ((0.30 + norm * 0.70) * 100.0).round() / 100.0;
-                    state.auto_save();
-                    SetCapture(hwnd);
-                } else if in_rect(x, y, SLIDER_CARD_GLOW) {
-                    state.dragging_slider = Some(3);
-                    let norm = ((x - (SLIDER_CARD_GLOW.0 + 14.0)) / (SLIDER_CARD_GLOW.2 - SLIDER_CARD_GLOW.0 - 28.0)).clamp(0.0, 1.0);
-                    state.glow_intensity = (norm * 100.0).round() / 100.0;
-                    state.auto_save();
-                    SetCapture(hwnd);
-                } else if in_rect(x, y, SLIDER_CARD_VINYL_SPEED) {
-                    state.dragging_slider = Some(4);
-                    let norm = ((x - (SLIDER_CARD_VINYL_SPEED.0 + 14.0)) / (SLIDER_CARD_VINYL_SPEED.2 - SLIDER_CARD_VINYL_SPEED.0 - 28.0)).clamp(0.0, 1.0);
-                    state.vinyl_speed = ((0.1 + norm * 1.9) * 10.0).round() / 10.0;
-                    state.auto_save();
-                    SetCapture(hwnd);
-                }
-                // 4. Interactive Toggles (Full card clickable!)
-                else if in_rect(x, y, TOGGLE_CARD_DYNAMIC_COLOR) {
-                    state.dynamic_color = !state.dynamic_color;
-                    state.auto_save();
-                } else if in_rect(x, y, TOGGLE_CARD_AUDIO_VIZ) {
-                    state.enable_media = !state.enable_media;
-                    state.auto_save();
-                } else if in_rect(x, y, TOGGLE_CARD_VINYL_ANIM) {
-                    state.enable_vinyl = !state.enable_vinyl;
-                    state.auto_save();
-                } else if in_rect(x, y, TOGGLE_CARD_HOVER_EXPAND) {
-                    state.hover_expand = !state.hover_expand;
-                    state.auto_save();
-                } else if in_rect(x, y, TOGGLE_CARD_CLICK_THROUGH) {
-                    state.click_through = !state.click_through;
-                    state.auto_save();
-                } else if in_rect(x, y, TOGGLE_CARD_STARTUP) {
-                    state.start_with_windows = !state.start_with_windows;
-                    state.auto_save();
+
+                match state.active_tab {
+                    SettingsTab::Appearance => {
+                        // Style cards
+                        let style_cards = [
+                            (CARD_STYLE_0, IslandStyle::SleekCapsule),
+                            (CARD_STYLE_1, IslandStyle::BalancedPill),
+                            (CARD_STYLE_2, IslandStyle::SpaciousCard),
+                            (CARD_STYLE_3, IslandStyle::CompactMinimal),
+                        ];
+                        for &(rect_f, style) in &style_cards {
+                            if in_rect(x, y, rect_f) {
+                                state.island_style = style;
+                                state.auto_save();
+                                let _ = InvalidateRect(Some(hwnd), None, false);
+                                return LRESULT(0);
+                            }
+                        }
+
+                        // Compact view chips
+                        let chips = [
+                            (CHIP_VIEW_0, CompactDisplayMode::Combined),
+                            (CHIP_VIEW_1, CompactDisplayMode::TitleOnly),
+                            (CHIP_VIEW_2, CompactDisplayMode::WaveOnly),
+                        ];
+                        for &(rect_f, mode) in &chips {
+                            if in_rect(x, y, rect_f) {
+                                state.compact_view = mode;
+                                state.auto_save();
+                                let _ = InvalidateRect(Some(hwnd), None, false);
+                                return LRESULT(0);
+                            }
+                        }
+
+                        // Sliders in Tab 0
+                        if in_rect(x, y, SLIDER_CARD_MARGIN) {
+                            state.dragging_slider = Some(0);
+                            let norm = ((x - (SLIDER_CARD_MARGIN.0 + 14.0)) / (SLIDER_CARD_MARGIN.2 - SLIDER_CARD_MARGIN.0 - 28.0)).clamp(0.0, 1.0);
+                            state.top_margin = (norm * 60.0).round();
+                            state.auto_save();
+                            SetCapture(hwnd);
+                        } else if in_rect(x, y, SLIDER_CARD_OPACITY) {
+                            state.dragging_slider = Some(2);
+                            let norm = ((x - (SLIDER_CARD_OPACITY.0 + 14.0)) / (SLIDER_CARD_OPACITY.2 - SLIDER_CARD_OPACITY.0 - 28.0)).clamp(0.0, 1.0);
+                            state.island_opacity = ((0.30 + norm * 0.70) * 100.0).round() / 100.0;
+                            state.auto_save();
+                            SetCapture(hwnd);
+                        } else if in_rect(x, y, SLIDER_CARD_GLOW) {
+                            state.dragging_slider = Some(3);
+                            let norm = ((x - (SLIDER_CARD_GLOW.0 + 14.0)) / (SLIDER_CARD_GLOW.2 - SLIDER_CARD_GLOW.0 - 28.0)).clamp(0.0, 1.0);
+                            state.glow_intensity = (norm * 100.0).round() / 100.0;
+                            state.auto_save();
+                            SetCapture(hwnd);
+                        }
+                    }
+
+                    SettingsTab::Music => {
+                        if in_rect(x, y, TOGGLE_CARD_DYNAMIC_COLOR) {
+                            state.dynamic_color = !state.dynamic_color;
+                            state.auto_save();
+                        } else if in_rect(x, y, TOGGLE_CARD_AUDIO_VIZ) {
+                            state.enable_media = !state.enable_media;
+                            state.auto_save();
+                        } else if in_rect(x, y, TOGGLE_CARD_VINYL_ANIM) {
+                            state.enable_vinyl = !state.enable_vinyl;
+                            state.auto_save();
+                        } else if in_rect(x, y, TOGGLE_CARD_HOVER_EXPAND) {
+                            state.hover_expand = !state.hover_expand;
+                            state.auto_save();
+                        } else if in_rect(x, y, SLIDER_CARD_VINYL_SPEED) {
+                            state.dragging_slider = Some(4);
+                            let norm = ((x - (SLIDER_CARD_VINYL_SPEED.0 + 14.0)) / (SLIDER_CARD_VINYL_SPEED.2 - SLIDER_CARD_VINYL_SPEED.0 - 28.0)).clamp(0.0, 1.0);
+                            state.vinyl_speed = ((0.1 + norm * 1.9) * 10.0).round() / 10.0;
+                            state.auto_save();
+                            SetCapture(hwnd);
+                        } else if in_rect(x, y, SLIDER_CARD_COMPACT_WIDTH) {
+                            state.dragging_slider = Some(5);
+                            let norm = ((x - (SLIDER_CARD_COMPACT_WIDTH.0 + 14.0)) / (SLIDER_CARD_COMPACT_WIDTH.2 - SLIDER_CARD_COMPACT_WIDTH.0 - 28.0)).clamp(0.0, 1.0);
+                            state.compact_music_width = ((160.0 + norm * 260.0) / 5.0).round() * 5.0;
+                            state.auto_save();
+                            SetCapture(hwnd);
+                        }
+                    }
+
+                    SettingsTab::System => {
+                        if in_rect(x, y, TOGGLE_CARD_STARTUP) {
+                            state.start_with_windows = !state.start_with_windows;
+                            crate::config::set_autostart_enabled(state.start_with_windows);
+                            state.auto_save();
+                        } else if in_rect(x, y, TOGGLE_CARD_CLICK_THROUGH) {
+                            state.click_through = !state.click_through;
+                            state.auto_save();
+                        } else if in_rect(x, y, TOGGLE_CARD_SMART_CONTOUR) {
+                            state.smart_contour = !state.smart_contour;
+                            state.auto_save();
+                        } else if in_rect(x, y, SLIDER_CARD_TIMEOUT) {
+                            state.dragging_slider = Some(1);
+                            let norm = ((x - (SLIDER_CARD_TIMEOUT.0 + 14.0)) / (SLIDER_CARD_TIMEOUT.2 - SLIDER_CARD_TIMEOUT.0 - 28.0)).clamp(0.0, 1.0);
+                            state.duration = ((2.0 + norm * 13.0) * 10.0).round() / 10.0;
+                            state.auto_save();
+                            SetCapture(hwnd);
+                        }
+                    }
                 }
 
                 let _ = InvalidateRect(Some(hwnd), None, false);
             }
             LRESULT(0)
         }
+
         WM_MOUSEMOVE => {
             let x = (lparam.0 & 0xFFFF) as i16 as f32;
             let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
@@ -926,26 +1171,25 @@ unsafe extern "system" fn settings_wndproc(
                             state.vinyl_speed = ((0.1 + norm * 1.9) * 10.0).round() / 10.0;
                             state.auto_save();
                         }
+                        5 => {
+                            let norm = ((x - (SLIDER_CARD_COMPACT_WIDTH.0 + 14.0)) / (SLIDER_CARD_COMPACT_WIDTH.2 - SLIDER_CARD_COMPACT_WIDTH.0 - 28.0)).clamp(0.0, 1.0);
+                            state.compact_music_width = ((160.0 + norm * 260.0) / 5.0).round() * 5.0;
+                            state.auto_save();
+                        }
                         _ => {}
                     }
                     let _ = InvalidateRect(Some(hwnd), None, false);
-                } else {
+                } else if state.active_tab == SettingsTab::Appearance {
                     let old_hover = state.hovered_item;
                     let mut new_hover = None;
 
-                    if in_rect(x, y, CARD_STYLE_0) { new_hover = Some(0); }
-                    else if in_rect(x, y, CARD_STYLE_1) { new_hover = Some(1); }
-                    else if in_rect(x, y, CARD_STYLE_2) { new_hover = Some(2); }
-                    else if in_rect(x, y, CARD_STYLE_3) { new_hover = Some(3); }
-                    else if in_rect(x, y, CHIP_VIEW_0) { new_hover = Some(10); }
-                    else if in_rect(x, y, CHIP_VIEW_1) { new_hover = Some(11); }
-                    else if in_rect(x, y, CHIP_VIEW_2) { new_hover = Some(12); }
-                    else if in_rect(x, y, TOGGLE_CARD_DYNAMIC_COLOR) { new_hover = Some(20); }
-                    else if in_rect(x, y, TOGGLE_CARD_AUDIO_VIZ) { new_hover = Some(21); }
-                    else if in_rect(x, y, TOGGLE_CARD_VINYL_ANIM) { new_hover = Some(22); }
-                    else if in_rect(x, y, TOGGLE_CARD_HOVER_EXPAND) { new_hover = Some(23); }
-                    else if in_rect(x, y, TOGGLE_CARD_CLICK_THROUGH) { new_hover = Some(24); }
-                    else if in_rect(x, y, TOGGLE_CARD_STARTUP) { new_hover = Some(25); }
+                    let style_cards = [CARD_STYLE_0, CARD_STYLE_1, CARD_STYLE_2, CARD_STYLE_3];
+                    for (i, &rect_f) in style_cards.iter().enumerate() {
+                        if in_rect(x, y, rect_f) {
+                            new_hover = Some(i);
+                            break;
+                        }
+                    }
 
                     if old_hover != new_hover {
                         state.hovered_item = new_hover;
@@ -955,6 +1199,7 @@ unsafe extern "system" fn settings_wndproc(
             }
             LRESULT(0)
         }
+
         WM_LBUTTONUP => {
             let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut SettingsState;
             if !state_ptr.is_null() {
@@ -962,20 +1207,21 @@ unsafe extern "system" fn settings_wndproc(
                 if state.dragging_slider.is_some() {
                     state.dragging_slider = None;
                     let _ = ReleaseCapture();
-                    let _ = InvalidateRect(Some(hwnd), None, false);
                 }
             }
             LRESULT(0)
         }
+
         WM_DESTROY => {
             let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut SettingsState;
             if !state_ptr.is_null() {
+                let _ = Box::from_raw(state_ptr);
                 SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0);
-                drop(Box::from_raw(state_ptr));
             }
             SETTINGS_OPEN.store(false, Ordering::SeqCst);
             LRESULT(0)
         }
+
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
     }
 }

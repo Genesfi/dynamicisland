@@ -56,8 +56,11 @@ pub struct Renderer {
     pub accent_color: (f32, f32, f32),
     pub album_art: Option<ID2D1Bitmap>,
     pub wic_factory: IWICImagingFactory,
+    #[allow(dead_code)]
     pub icon_manager: crate::icons::IconManager,
+    #[allow(dead_code)]
     pub cached_is_light: bool,
+    #[allow(dead_code)]
     pub lum_frame_counter: u32,
 }
 
@@ -533,7 +536,21 @@ impl Renderer {
                 radiusY: corner_r,
             };
 
-            if lower.contains("youtube") || (lower.contains("music") && !lower.contains("spotify")) {
+            if lower.contains("netflix") {
+                // Netflix: Iconic Deep Charcoal Squircle (#141414) + Signature Netflix Red "N" (#E50914)
+                self.brush_badge.SetColor(&D2D1_COLOR_F { r: 0.08, g: 0.08, b: 0.08, a: alpha });
+                self.d2d_context.FillRoundedRectangle(&squircle, &self.brush_badge);
+
+                self.brush_badge.SetColor(&D2D1_COLOR_F { r: 0.898, g: 0.035, b: 0.078, a: alpha });
+                let nh = radius * 0.58;
+                let nw = radius * 0.40;
+                // Left vertical stem
+                self.d2d_context.DrawLine(pt(cx - nw, cy - nh), pt(cx - nw, cy + nh), &self.brush_badge, 2.0, None);
+                // Right vertical stem
+                self.d2d_context.DrawLine(pt(cx + nw, cy - nh), pt(cx + nw, cy + nh), &self.brush_badge, 2.0, None);
+                // Diagonal ribbon
+                self.d2d_context.DrawLine(pt(cx - nw, cy - nh), pt(cx + nw, cy + nh), &self.brush_badge, 2.2, None);
+            } else if lower.contains("youtube") || (lower.contains("music") && !lower.contains("spotify")) {
                 // 1. YouTube / YouTube Music: YouTube Red background (#FF0000)
                 self.brush_badge.SetColor(&D2D1_COLOR_F { r: 0.95, g: 0.10, b: 0.10, a: alpha });
                 self.d2d_context.FillRoundedRectangle(&squircle, &self.brush_badge);
@@ -721,6 +738,7 @@ impl Renderer {
     }
 
     /// Detects if the screen background behind the island is predominantly light or dark.
+    #[allow(dead_code)]
     pub fn is_background_light(&self, screen_x: i32, screen_y: i32, width: i32, height: i32) -> bool {
         unsafe {
             let hdc = GetDC(None);
@@ -903,8 +921,8 @@ impl Renderer {
         alpha: f32,
     ) {
         unsafe {
-            let bar_width = 1.9;
-            let bar_spacing = 2.2;
+            let bar_width = 1.6;
+            let bar_spacing = 1.9;
             let total_w = (bar_count as f32) * bar_width + ((bar_count - 1) as f32) * bar_spacing;
             let start_x = cx - total_w * 0.5;
 
@@ -925,8 +943,8 @@ impl Renderer {
                 // Symmetric bell-curve envelope: center is tall, edges taper to delicate dots
                 let envelope = (-0.5 * (dist / sigma).powi(2)).exp();
 
-                let harmonic = ((phase * 2.6 + dist * 1.3).sin() * 0.5 + 0.5) * 0.35;
-                let dynamic_factor = (peak * 0.80 + harmonic).clamp(0.06, 1.0);
+                let harmonic = ((phase * 2.8 + dist * 1.2).sin() * 0.5 + 0.5) * 0.45;
+                let dynamic_factor = (peak * 1.10 + harmonic * 0.55).clamp(0.12, 1.0);
 
                 let min_h = 2.4; // Rounded pill dot at edges
                 let h = (min_h + dynamic_factor * envelope * (max_h - min_h)).max(min_h);
@@ -1106,18 +1124,13 @@ impl Renderer {
                 radiusY: radius,
             };
 
-            // Sample screen coordinates to detect whether the background behind the island is light or dark
-            let screen_width = windows::Win32::UI::WindowsAndMessaging::GetSystemMetrics(windows::Win32::UI::WindowsAndMessaging::SM_CXSCREEN);
-            let pos_x = (screen_width - 800) / 2;
-            let pill_screen_x = pos_x + left as i32;
-            let pill_screen_y = top as i32;
-            let pill_w = (right - left).max(1.0) as i32;
-            let pill_h_i32 = (bottom - top).max(1.0) as i32;
-
             // The island is an obsidian capsule overlay; text and buttons remain crisp white for high contrast & legibility
-            self.brush_white.SetColor(&D2D1_COLOR_F { r: 0.98, g: 0.98, b: 1.0, a: 1.0 });
-            self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.75, g: 0.77, b: 0.82, a: 1.0 });
-            self.brush_time.SetColor(&D2D1_COLOR_F { r: 0.65, g: 0.68, b: 0.75, a: 1.0 });
+            self.brush_white.SetOpacity(1.0);
+            self.brush_subtext.SetOpacity(1.0);
+            self.brush_time.SetOpacity(1.0);
+            self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+            self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.80, g: 0.82, b: 0.88, a: 1.0 });
+            self.brush_time.SetColor(&D2D1_COLOR_F { r: 0.70, g: 0.72, b: 0.78, a: 1.0 });
 
             let btn_bg_color = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.14 };
             self.brush_btn_bg.SetColor(&btn_bg_color);
@@ -1159,18 +1172,14 @@ impl Renderer {
             });
             self.d2d_context.FillRoundedRectangle(&pill_rect, &self.brush_bg);
 
-            // 4. Draw subtle luminous rim / border (tinted dynamically or adaptive to background)
-            if is_light_bg {
-                self.brush_border.SetColor(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.25 });
+            // 4. Draw subtle luminous rim / border (tinted dynamically with album color)
+            let (br, bg, bb) = if config.dynamic_album_color {
+                self.accent_color
             } else {
-                let (br, bg, bb) = if config.dynamic_album_color {
-                    self.accent_color
-                } else {
-                    (1.0, 1.0, 1.0)
-                };
-                let border_alpha = 0.30 + config.glow_intensity * 0.45;
-                self.brush_border.SetColor(&D2D1_COLOR_F { r: br, g: bg, b: bb, a: border_alpha });
-            }
+                (1.0, 1.0, 1.0)
+            };
+            let border_alpha = 0.30 + config.glow_intensity * 0.45;
+            self.brush_border.SetColor(&D2D1_COLOR_F { r: br, g: bg, b: bb, a: border_alpha });
             self.d2d_context.DrawRoundedRectangle(&pill_rect, &self.brush_border, 1.2, None);
 
             // 5. Render Content based on state
@@ -1193,11 +1202,7 @@ impl Renderer {
                             radiusX: thumb_r,
                             radiusY: thumb_r,
                         };
-                        let rim_color = if is_light_bg {
-                            D2D1_COLOR_F { r: 0.10, g: 0.12, b: 0.16, a: 0.35 }
-                        } else {
-                            D2D1_COLOR_F { r: self.accent_color.0, g: self.accent_color.1, b: self.accent_color.2, a: 0.70 }
-                        };
+                        let rim_color = D2D1_COLOR_F { r: self.accent_color.0, g: self.accent_color.1, b: self.accent_color.2, a: 0.70 };
                         self.brush_border.SetColor(&rim_color);
                         self.d2d_context.DrawEllipse(&thumb_circle, &self.brush_border, 1.2, None);
                     } else {
@@ -1235,8 +1240,8 @@ impl Renderer {
                     // 2. Compact View Modes: Combined (Title + Wave), TitleOnly, or WaveOnly
                     match config.compact_mode_view {
                         crate::config::CompactDisplayMode::Combined => {
-                            let clip_left = left + 29.0;
-                            let clip_right = right - 48.0;
+                            let clip_left = left + 30.0;
+                            let clip_right = if config.enable_media_island { right - 66.0 } else { right - 22.0 };
                             if clip_right > clip_left {
                                 let clip_rect = D2D_RECT_F { left: clip_left, top, right: clip_right, bottom };
                                 self.d2d_context.PushAxisAlignedClip(&clip_rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -1329,8 +1334,8 @@ impl Renderer {
                             }
                         }
                         crate::config::CompactDisplayMode::TitleOnly => {
-                            let clip_left = left + 29.0;
-                            let clip_right = right - 32.0;
+                            let clip_left = left + 30.0;
+                            let clip_right = right - 22.0;
                             if clip_right > clip_left {
                                 let clip_rect = D2D_RECT_F { left: clip_left, top, right: clip_right, bottom };
                                 self.d2d_context.PushAxisAlignedClip(&clip_rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -1448,8 +1453,7 @@ impl Renderer {
                     self.brush_idle_dot.SetOpacity(0.90);
                     self.d2d_context.FillEllipse(&ellipse, &self.brush_idle_dot);
 
-                    let mut st = windows::Win32::System::SystemInformation::SYSTEMTIME::default();
-                    windows::Win32::System::SystemInformation::GetLocalTime(&mut st);
+                    let st = windows::Win32::System::SystemInformation::GetLocalTime();
                     let time_str = format!("{:02}:{:02}", st.wHour, st.wMinute);
                     let time_utf16: Vec<u16> = time_str.encode_utf16().collect();
 
@@ -1460,7 +1464,8 @@ impl Renderer {
                     let date_str = format!("{} {} {}", day_names[day_idx], st.wDay, month_names[month_idx]);
                     let date_utf16: Vec<u16> = date_str.encode_utf16().collect();
 
-                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 0.98, g: 0.98, b: 1.0, a: 0.95 });
+                    self.brush_white.SetOpacity(1.0);
+                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
                     let time_rect = D2D_RECT_F {
                         left: left + 24.0,
                         top,
@@ -1476,7 +1481,8 @@ impl Renderer {
                         DWRITE_MEASURING_MODE_NATURAL,
                     );
 
-                    self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.70, g: 0.72, b: 0.78, a: 0.75 });
+                    self.brush_subtext.SetOpacity(1.0);
+                    self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.82, g: 0.85, b: 0.92, a: 1.0 });
                     let date_rect = D2D_RECT_F {
                         left: left + 64.0,
                         top,
@@ -1686,7 +1692,7 @@ impl Renderer {
                     let title_rect = D2D_RECT_F {
                         left: text_left,
                         top: top + (pill_h * 0.16),
-                        right: text_right,
+                        right: text_right - 48.0,
                         bottom: top + (pill_h * 0.50),
                     };
                     let title_utf16: Vec<u16> = track.title.encode_utf16().collect();
@@ -1728,7 +1734,7 @@ impl Renderer {
                             island.audio_peak,
                             island.audio_phase,
                             11,
-                            13.0,
+                            18.0,
                             alpha * 0.95,
                         );
                     }

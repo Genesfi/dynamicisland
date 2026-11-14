@@ -103,6 +103,7 @@ pub enum CompactDisplayMode {
 }
 
 impl CompactDisplayMode {
+    #[allow(dead_code)]
     pub fn display_name(&self) -> &'static str {
         match self {
             CompactDisplayMode::Combined => "Title & Wave",
@@ -121,11 +122,14 @@ pub struct AppConfig {
     pub glow_intensity: f32,
     pub vinyl_speed: f32,
     pub compact_mode_view: CompactDisplayMode,
+    pub compact_music_width: f32,
     pub dynamic_album_color: bool,
     pub enable_media_island: bool,
     pub enable_vinyl_animation: bool,
     pub hover_expand_media: bool,
     pub idle_click_through: bool,
+    pub smart_contour: bool,
+    pub contour_nudge_y: f32,
     pub start_with_windows: bool,
 }
 
@@ -139,11 +143,14 @@ impl Default for AppConfig {
             glow_intensity: 0.60,
             vinyl_speed: 1.0,
             compact_mode_view: CompactDisplayMode::Combined,
+            compact_music_width: 260.0,
             dynamic_album_color: true,
             enable_media_island: true,
             enable_vinyl_animation: true,
             hover_expand_media: true,
             idle_click_through: true,
+            smart_contour: true,
+            contour_nudge_y: 34.0,
             start_with_windows: is_autostart_enabled(),
         }
     }
@@ -198,6 +205,11 @@ impl AppConfig {
                                 _ => CompactDisplayMode::Combined,
                             };
                         }
+                        "compact_music_width" => {
+                            if let Ok(val) = parts[1].parse::<f32>() {
+                                cfg.compact_music_width = val.clamp(160.0, 450.0);
+                            }
+                        }
                         "dynamic_album_color" => {
                             cfg.dynamic_album_color = parts[1] == "true" || parts[1] == "1";
                         }
@@ -212,6 +224,14 @@ impl AppConfig {
                         }
                         "idle_click_through" => {
                             cfg.idle_click_through = parts[1] == "true" || parts[1] == "1";
+                        }
+                        "smart_contour" => {
+                            cfg.smart_contour = parts[1] == "true" || parts[1] == "1";
+                        }
+                        "contour_nudge_y" => {
+                            if let Ok(val) = parts[1].parse::<f32>() {
+                                cfg.contour_nudge_y = val.clamp(20.0, 60.0);
+                            }
                         }
                         "start_with_windows" => {
                             cfg.start_with_windows = parts[1] == "true" || parts[1] == "1";
@@ -247,7 +267,7 @@ impl AppConfig {
         };
 
         let content = format!(
-            "# Dynamic Island Settings\ntop_margin={}\nauto_collapse_secs={}\nisland_style={}\nisland_opacity={:.2}\nglow_intensity={:.2}\nvinyl_speed={:.2}\ncompact_mode_view={}\ndynamic_album_color={}\nenable_media_island={}\nenable_vinyl_animation={}\nhover_expand_media={}\nidle_click_through={}\nstart_with_windows={}\n",
+            "# Dynamic Island Settings\ntop_margin={}\nauto_collapse_secs={}\nisland_style={}\nisland_opacity={:.2}\nglow_intensity={:.2}\nvinyl_speed={:.2}\ncompact_mode_view={}\ncompact_music_width={:.1}\ndynamic_album_color={}\nenable_media_island={}\nenable_vinyl_animation={}\nhover_expand_media={}\nidle_click_through={}\nsmart_contour={}\ncontour_nudge_y={:.1}\nstart_with_windows={}\n",
             self.top_margin,
             self.auto_collapse_secs,
             style_str,
@@ -255,11 +275,14 @@ impl AppConfig {
             self.glow_intensity,
             self.vinyl_speed,
             view_str,
+            self.compact_music_width,
             self.dynamic_album_color,
             self.enable_media_island,
             self.enable_vinyl_animation,
             self.hover_expand_media,
             self.idle_click_through,
+            self.smart_contour,
+            self.contour_nudge_y,
             self.start_with_windows
         );
         let _ = fs::write("config.txt", content);

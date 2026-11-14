@@ -29,7 +29,7 @@ use windows::{
     core::*,
     Win32::{
         Foundation::*,
-        Graphics::Gdi::HBRUSH,
+        Graphics::Gdi::{CreateRectRgn, CreateRoundRectRgn, SetWindowRgn, HBRUSH},
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
@@ -53,8 +53,148 @@ struct AppState {
     last_tick: Instant,
     smoothed_dt: f32,
     is_tracking_mouse: bool,
+    hover_dwell_time: f32,
+    last_rgn_rect: (i32, i32, i32, i32),
     notif_receiver: Receiver<Notification>,
     media_receiver: Receiver<MediaEvent>,
+}
+
+/// Dynamically syncs the OS window clipping region (GDI HRGN) to the exact pill capsule geometry.
+/// Any pixels outside this region physically DO NOT EXIST to the Windows Window Manager,
+/// allowing 100% unimpeded clicks directly through to underlying browser tabs, search bars, and breadcrumbs!
+fn sync_window_region(hwnd: HWND, state: &mut AppState) {
+    let (left, top, right, bottom) = state.island.get_pill_rect();
+    let cur_r = state.island.radius_spring.current;
+
+    // Check if in pure idle mode with click-through enabled
+    if state.config.idle_click_through
+        && state.island.mode == island::IslandMode::Idle
+        && !state.island.is_media_playing
+        && state.island.current_track.is_none()
+    {
+        let cur = (0, 0, 0, 0);
+        if state.last_rgn_rect != cur {
+            state.last_rgn_rect = cur;
+            unsafe {
+                let empty_rgn = CreateRectRgn(0, 0, 0, 0);
+                let _ = SetWindowRgn(hwnd, Some(empty_rgn), true);
+            }
+        }
+        return;
+    }
+
+    // Dynamic outer margin: when glow is active, provide generous 16px padding so Direct2D
+    // soft ambient glow is completely unclipped and buttery smooth!
+    let pad = if state.config.glow_intensity > 0.01 { 16.0f32 } else { 3.0f32 };
+    let l = (left - pad).round().max(0.0) as i32;
+    let t = (top - pad).round().max(0.0) as i32;
+    let r = (right + pad).round().min(WINDOW_WIDTH as f32) as i32;
+    let b = (bottom + pad).round().min(WINDOW_HEIGHT as f32) as i32;
+    let cur = (l, t, r, b);
+
+    if state.last_rgn_rect != cur {
+        state.last_rgn_rect = cur;
+        unsafe {
+            let diam = (((cur_r + pad) * 2.0).round() as i32).max(1);
+            let rgn = CreateRoundRectRgn(l, t, r, b, diam, diam);
+            let _ = SetWindowRgn(hwnd, Some(rgn), true);
+        }
+    }
+}
+
+/// Detects if the active foreground window is in Fullscreen mode (Netflix, YouTube Fullscreen, Video Players, Games).
+fn is_foreground_fullscreen(fg: HWND, screen_w: i32, screen_h: i32) -> bool {
+    if fg.0.is_null() {
+        return false;
+    }
+    unsafe {
+        let shell_wnd = GetShellWindow();
+        if fg == shell_wnd {
+            return false;
+        }
+
+        let mut rc = RECT::default();
+        if GetWindowRect(fg, &mut rc).is_err() {
+            return false;
+        }
+
+        // Fullscreen windows cover the full primary monitor resolution (with 2px tolerance for DPI margins)
+        let covers_screen = rc.left <= 2 && rc.top <= 2 && rc.right >= (screen_w - 2) && rc.bottom >= (screen_h - 2);
+        if !covers_screen {
+            return false;
+        }
+
+        let mut class_buf = [0u16; 64];
+        let len = GetClassNameW(fg, &mut class_buf) as usize;
+        let class = String::from_utf16_lossy(&class_buf[..len]);
+        if class == "Progman" || class == "WorkerW" || class == "Shell_TrayWnd" {
+            return false;
+        }
+
+        let mut work_area = RECT::default();
+        let _ = SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut work_area as *mut _ as *mut _),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+
+        // When a window extends beyond the Windows work area down to screen_h (covers the taskbar completely),
+        // it is a true Fullscreen player (Netflix, YouTube fullscreen, video playback, game)
+        if rc.bottom > work_area.bottom {
+            return true;
+        }
+
+        let style = GetWindowLongW(fg, GWL_STYLE) as u32;
+        let has_caption = (style & WS_CAPTION.0) == WS_CAPTION.0;
+        !has_caption
+    }
+}
+
+/// Automatically nudges the island down when active foreground app is a browser with top tabs.
+fn update_smart_contour(state: &mut AppState, fg: HWND, hwnd: HWND) {
+    if !state.config.smart_contour {
+        state.island.y_spring.set_target(state.config.top_margin);
+        return;
+    }
+
+    if fg.0.is_null() || fg == hwnd {
+        return;
+    }
+
+    unsafe {
+        let mut rc = RECT::default();
+        let _ = GetWindowRect(fg, &mut rc);
+
+        // Check if the foreground window is docked or maximized at the top
+        let is_at_top = rc.top <= 24 && rc.bottom >= 400 && (rc.right - rc.left) >= 500;
+
+        if is_at_top {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(fg, Some(&mut pid));
+            if pid != 0 {
+                let exe = crate::media::get_process_name(pid).to_lowercase();
+
+                // Strictly target web browsers (Chrome, Edge, Brave, Firefox, Opera, Vivaldi)
+                // that always feature a top tab strip when browsing!
+                let is_browser = exe.contains("chrome")
+                    || exe.contains("msedge")
+                    || exe.contains("brave")
+                    || exe.contains("firefox")
+                    || exe.contains("opera")
+                    || exe.contains("vivaldi");
+
+                if is_browser {
+                    // Smoothly nudge down to contour_nudge_y (default 34px, just below tab strip, well above bookmarks)
+                    state.island.y_spring.set_target(state.config.contour_nudge_y + state.config.top_margin);
+                    return;
+                }
+            }
+        }
+    }
+
+    // For desktop, File Explorer, settings, or floating windows: stay flush at top!
+    state.island.y_spring.set_target(state.config.top_margin);
 }
 
 unsafe extern "system" fn wndproc(
@@ -70,29 +210,31 @@ unsafe extern "system" fn wndproc(
                 let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
                 if !state_ptr.is_null() {
                     let state = &*state_ptr;
-                    // When in idle mode and click-through enabled, pass clicks straight through to browser tabs!
-                    if state.config.idle_click_through && state.island.mode == island::IslandMode::Idle {
-                        return LRESULT(HTTRANSPARENT as isize);
-                    }
-
                     let screen_x = (lparam.0 & 0xFFFF) as i16 as i32;
                     let screen_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
 
                     let mut rect = RECT::default();
                     let _ = GetWindowRect(hwnd, &mut rect);
 
-                    if state.island.hit_test(screen_x, screen_y, rect.left, rect.top) {
-                        // When in idle or slim mode and not hovered, let clicks pass straight through to browser tabs!
-                        if state.config.idle_click_through
-                            && (state.island.mode == island::IslandMode::Idle
-                                || (state.island.mode == island::IslandMode::Slim && !state.island.is_hovered))
-                        {
-                            return LRESULT(HTTRANSPARENT as isize);
-                        }
-                        return LRESULT(HTCLIENT as isize);
-                    } else {
+                    // Strictly test whether cursor falls inside the visible capsule pill
+                    let is_hit = state.island.hit_test(screen_x, screen_y, rect.left, rect.top);
+                    if !is_hit {
+                        // Any point outside the island pill is 100% transparent and clicks pass through!
                         return LRESULT(HTTRANSPARENT as isize);
                     }
+
+                    // Inside the pill:
+                    if state.island.mode == island::IslandMode::Idle {
+                        if state.island.is_media_playing || state.island.current_track.is_some() {
+                            // Active media pill: allow clicking to open/focus music player (YouTube Music, Spotify)!
+                            return LRESULT(HTCLIENT as isize);
+                        } else if state.config.idle_click_through {
+                            // Pure idle clock notch with click-through enabled: pass clicks to browser tabs underneath
+                            return LRESULT(HTTRANSPARENT as isize);
+                        }
+                    }
+
+                    return LRESULT(HTCLIENT as isize);
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
@@ -128,13 +270,13 @@ unsafe extern "system" fn wndproc(
                 let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
                 if !state_ptr.is_null() {
                     let state = &mut *state_ptr;
+                    let mouse_x = (lparam.0 & 0xFFFF) as i16 as f32;
+                    let mouse_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
+
+                    let (_left, top, right, bottom) = state.island.get_pill_rect();
+                    let cy = (top + bottom) * 0.5;
+
                     if state.island.mode == island::IslandMode::Expanded {
-                        let mouse_x = (lparam.0 & 0xFFFF) as i16 as f32;
-                        let mouse_y = ((lparam.0 >> 16) & 0xFFFF) as i16 as f32;
-
-                        let (_left, top, right, bottom) = state.island.get_pill_rect();
-                        let cy = (top + bottom) * 0.5;
-
                         // If expanded with media, check playback control buttons
                         if state.island.current_track.is_some() || state.island.is_media_playing {
                             let prev_x = right - 92.0;
@@ -158,10 +300,21 @@ unsafe extern "system" fn wndproc(
                                 state.island.remaining_time = 4.0;
                                 return LRESULT(0);
                             }
+
+                            // Clicked anywhere else on the expanded pill (album art, title, pill surface):
+                            // Focus or toggle YouTube Music / Spotify / Browser tab like focusgrow-rs!
+                            crate::media::activate_or_toggle_media_player(state.island.current_track.as_ref());
+                            state.island.dismiss();
+                            return LRESULT(0);
                         }
 
                         // Otherwise clicking on the island dismisses it
                         state.island.dismiss();
+                    } else if state.island.mode == island::IslandMode::Idle || state.island.mode == island::IslandMode::Slim {
+                        if state.island.is_media_playing || state.island.current_track.is_some() {
+                            // Clicked compact/slim media pill: open/focus YouTube Music / Spotify / Browser tab!
+                            crate::media::activate_or_toggle_media_player(state.island.current_track.as_ref());
+                        }
                     }
                 }
                 LRESULT(0)
@@ -172,11 +325,7 @@ unsafe extern "system" fn wndproc(
                 if !state_ptr.is_null() {
                     let state = &mut *state_ptr;
                     if key == 0x1B {
-                        if state.island.mode == island::IslandMode::Expanded {
-                            state.island.dismiss();
-                        } else {
-                            let _ = DestroyWindow(hwnd);
-                        }
+                        state.island.dismiss();
                     }
                 }
                 LRESULT(0)
@@ -207,6 +356,7 @@ unsafe extern "system" fn wndproc(
                     state.island.island_style = state.config.island_style;
                     state.island.vinyl_speed = state.config.vinyl_speed;
                     state.island.compact_mode_view = state.config.compact_mode_view;
+                    state.island.compact_music_width = state.config.compact_music_width;
                     if state.island.mode == island::IslandMode::Expanded {
                         let (target_w, target_h, target_r) = state.island.island_style.dimensions();
                         state.island.width_spring.set_target(target_w);
@@ -221,7 +371,7 @@ unsafe extern "system" fn wndproc(
                 let event = (lparam.0 & 0xFFFF) as u32;
                 if event == WM_RBUTTONUP {
                     let _ = show_tray_menu(hwnd);
-                } else if event == WM_LBUTTONDBLCLK {
+                } else if event == WM_LBUTTONUP || event == WM_LBUTTONDBLCLK {
                     let _ = settings_window::open_settings_window(hwnd);
                 }
                 LRESULT(0)
@@ -242,15 +392,28 @@ unsafe extern "system" fn wndproc(
                         if state.config.enable_media_island {
                             match media_event {
                                 MediaEvent::TrackChanged { notif, thumbnail_bytes } => {
+                                    let same_track = state.island.current_track.as_ref().map(|t| {
+                                        t.title == notif.title && t.artist == notif.body
+                                    }).unwrap_or(false);
+
+                                    let prev_thumb = if same_track {
+                                        state.island.current_track.as_ref().and_then(|t| t.thumbnail_bytes.clone())
+                                    } else {
+                                        None
+                                    };
+
+                                    let effective_thumb = thumbnail_bytes.or(prev_thumb);
+
                                     state.island.current_track = Some(crate::island::TrackInfo {
                                         title: notif.title.clone(),
                                         artist: notif.body.clone(),
                                         is_playing: true,
-                                        thumbnail_bytes: thumbnail_bytes.clone(),
+                                        thumbnail_bytes: effective_thumb.clone(),
+                                        source: notif.app_name.clone(),
                                     });
-                                    if let Some(ref bytes) = thumbnail_bytes {
+                                    if let Some(ref bytes) = effective_thumb {
                                         state.renderer.set_album_art(bytes, state.config.dynamic_album_color);
-                                    } else {
+                                    } else if !same_track {
                                         state.renderer.clear_album_art();
                                     }
                                     state.island.show_notification(notif);
@@ -284,6 +447,25 @@ unsafe extern "system" fn wndproc(
                     // Update real PC audio peak amplitude from WASAPI
                     state.island.audio_peak = state.audio_meter.update(dt);
 
+                    let fg = GetForegroundWindow();
+                    let screen_w = GetSystemMetrics(SM_CXSCREEN);
+                    let screen_h = GetSystemMetrics(SM_CYSCREEN);
+
+                    // 1. Fullscreen Auto-Hide:
+                    // If active foreground window is fullscreen (e.g. Netflix, YouTube Fullscreen, Video, Games),
+                    // smoothly hide the Dynamic Island completely so it never blocks video or gameplay!
+                    if is_foreground_fullscreen(fg, screen_w, screen_h) {
+                        state.island.alpha_spring.set_target(0.0);
+                        state.island.y_spring.set_target(-100.0);
+                        state.island.update(dt);
+                        sync_window_region(hwnd, state);
+                        let _ = state.renderer.render(&state.island, &state.config);
+                        return LRESULT(0);
+                    }
+
+                    // 2. Smart Dynamic Contour Avoidance:
+                    update_smart_contour(state, fg, hwnd);
+
                     // Cursor hover detection & hover-to-expand
                     let mut cursor = POINT::default();
                     if GetCursorPos(&mut cursor).is_ok() {
@@ -292,21 +474,39 @@ unsafe extern "system" fn wndproc(
                         let is_hover = state.island.hit_test(cursor.x, cursor.y, rect.left, rect.top);
                         state.island.is_hovered = is_hover;
 
-                        // Hover on slim or idle media island expands smoothly without needing a click!
                         if is_hover {
+                            state.hover_dwell_time += dt;
+
                             if state.island.mode == island::IslandMode::Slim {
                                 state.island.expand_full();
                             } else if state.island.mode == island::IslandMode::Idle
                                 && (state.island.is_media_playing || state.island.current_track.is_some())
                             {
-                                if state.config.hover_expand_media {
+                                // Only expand media controls if hovered deliberately for >180ms.
+                                // This prevents accidental expansion when cursor quickly moves past the top of the screen!
+                                if state.config.hover_expand_media && state.hover_dwell_time >= 0.18 {
                                     state.island.expand_media();
                                 }
+                            }
+                        } else {
+                            state.hover_dwell_time = 0.0;
+                            if state.island.mode == island::IslandMode::Expanded {
+                                state.island.dismiss();
+                            }
+                        }
+                    }
+
+                    // Auto-rehydrate album art if current track has thumbnail bytes but renderer bitmap is empty
+                    if state.renderer.album_art.is_none() {
+                        if let Some(ref track) = state.island.current_track {
+                            if let Some(ref bytes) = track.thumbnail_bytes {
+                                state.renderer.set_album_art(bytes, state.config.dynamic_album_color);
                             }
                         }
                     }
 
                     state.island.update(dt);
+                    sync_window_region(hwnd, state);
                     let _ = state.renderer.render(&state.island, &state.config);
                 }
                 LRESULT(0)
@@ -376,8 +576,29 @@ fn run_app() -> Result<()> {
         let hinstance: HMODULE = GetModuleHandleW(None)?;
         let class_name = w!("DynamicIslandOverlayClass");
 
-        let icon_big = crate::icons::create_dynamic_island_icon(32).unwrap_or_default();
-        let icon_sm = crate::icons::create_dynamic_island_icon(16).unwrap_or_default();
+        let icon_big = LoadImageW(
+            Some(HINSTANCE(hinstance.0)),
+            PCWSTR(1 as *const u16),
+            IMAGE_ICON,
+            32,
+            32,
+            LR_DEFAULTCOLOR,
+        )
+        .ok()
+        .map(|h| HICON(h.0))
+        .unwrap_or_else(|| crate::icons::create_dynamic_island_icon(32).unwrap_or_default());
+
+        let icon_sm = LoadImageW(
+            Some(HINSTANCE(hinstance.0)),
+            PCWSTR(1 as *const u16),
+            IMAGE_ICON,
+            16,
+            16,
+            LR_DEFAULTCOLOR,
+        )
+        .ok()
+        .map(|h| HICON(h.0))
+        .unwrap_or_else(|| crate::icons::create_dynamic_island_icon(16).unwrap_or_default());
 
         let wnd_class = WNDCLASSEXW {
             cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
@@ -429,6 +650,7 @@ fn run_app() -> Result<()> {
         island.island_style = config.island_style;
         island.vinyl_speed = config.vinyl_speed;
         island.compact_mode_view = config.compact_mode_view;
+        island.compact_music_width = config.compact_music_width;
 
         // 6. Spawn Live Windows Notification Listener
         let (notif_tx, notif_rx) = std::sync::mpsc::channel::<Notification>();
@@ -451,6 +673,8 @@ fn run_app() -> Result<()> {
             last_tick: Instant::now(),
             smoothed_dt: 0.016,
             is_tracking_mouse: false,
+            hover_dwell_time: 0.0,
+            last_rgn_rect: (-1, -1, -1, -1),
             notif_receiver: notif_rx,
             media_receiver: media_rx,
         });
@@ -461,10 +685,11 @@ fn run_app() -> Result<()> {
         // 9. Start high-precision animation timer
         SetTimer(Some(hwnd), TIMER_ID, TIMER_INTERVAL_MS, None);
 
-        // 10. Initial render
+        // 10. Initial render & window region clipping
         let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
         if !state_ptr.is_null() {
             let state = &mut *state_ptr;
+            sync_window_region(hwnd, state);
             let _ = state.renderer.render(&state.island, &state.config);
         }
 

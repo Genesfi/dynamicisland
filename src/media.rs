@@ -5,6 +5,10 @@ use std::time::Duration;
 use windows::core::*;
 use windows::Media::Control::*;
 use windows::Storage::Streams::DataReader;
+use windows::Win32::Foundation::*;
+use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::Win32::UI::Input::KeyboardAndMouse::*;
+use windows::Win32::System::Threading::*;
 
 #[derive(Debug, Clone)]
 pub enum MediaEvent {
@@ -34,7 +38,7 @@ fn wait_async<T: RuntimeType + 'static>(
 }
 
 /// Helper to select the most relevant media session.
-/// Prioritizes dedicated music apps (Spotify, YouTube Music) with album titles over generic video playback.
+/// Prioritizes dedicated music apps (Tauri YTM, Spotify, YouTube Music) with album titles over generic video playback.
 fn get_best_media_session(
     manager: &GlobalSystemMediaTransportControlsSessionManager,
 ) -> Option<GlobalSystemMediaTransportControlsSession> {
@@ -53,28 +57,36 @@ fn get_best_media_session(
                 continue;
             }
 
-            let mut score = 20;
+            let mut score: i32 = 20;
 
             let source = s
                 .SourceAppUserModelId()
                 .map(|h| h.to_string().to_lowercase())
                 .unwrap_or_default();
 
-            if source.contains("spotify") || source.contains("applemusic") || source.contains("deezer") {
-                score += 100;
+            // Highest priority to Tauri YTM, Spotify, Apple Music
+            if source.contains("tauri") || source.contains("ytm") {
+                score += 250;
+            } else if source.contains("spotify") || source.contains("applemusic") || source.contains("deezer") {
+                score += 150;
             } else if source.contains("youtube") && source.contains("music") {
-                score += 90;
+                score += 120;
             }
 
             if let Ok(prop_op) = s.TryGetMediaPropertiesAsync() {
                 if let Ok(props) = wait_async(prop_op) {
+                    let title = props.Title().map(|h| h.to_string().to_lowercase()).unwrap_or_default();
                     let album = props.AlbumTitle().map(|h| h.to_string()).unwrap_or_default();
                     let artist = props.Artist().map(|h| h.to_string()).unwrap_or_default();
                     if !album.is_empty() {
-                        score += 50; // Music tracks have album titles
+                        score += 80; // Music tracks have album titles
                     }
                     if !artist.is_empty() {
-                        score += 20;
+                        score += 30;
+                    }
+                    // Mild penalty for generic video playback only if dedicated music tracks exist
+                    if title.contains(" - youtube") || title.contains("youtube.com") {
+                        score = score.saturating_sub(15).max(5);
                     }
                 }
             }
@@ -111,8 +123,341 @@ fn fetch_thumbnail_bytes(
     Some(buf)
 }
 
-/// Sends media transport commands (Play/Pause, Next, Previous) to Windows GSMTC.
+// =========================================================================
+// YTMPX WebSocket Integration (Tauri YouTube Music Desktop App Bridge)
+// =========================================================================
+
+#[derive(serde::Deserialize)]
+struct RawYtmpxPayload {
+    command: Option<String>,
+    event: Option<String>,
+    #[allow(dead_code)]
+    source: Option<String>,
+    is_playing: Option<bool>,
+    image: Option<String>,
+    thumbnail: Option<String>,
+    cover: Option<String>,
+    art: Option<String>,
+    metadata: Option<RawYtmpxMeta>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawYtmpxMeta {
+    title: Option<String>,
+    artist: Option<String>,
+    author: Option<String>,
+    album: Option<String>,
+    image: Option<String>,
+    thumbnail: Option<String>,
+    cover: Option<String>,
+    art: Option<String>,
+    status: Option<String>,
+}
+
+static YTMPX_CMD_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> = std::sync::Mutex::new(None);
+static YTMPX_CONNECTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn is_ytmpx_connected() -> bool {
+    YTMPX_CONNECTED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn send_ytmpx_command(cmd: &str) {
+    if let Ok(guard) = YTMPX_CMD_TX.lock() {
+        if let Some(ref tx) = *guard {
+            let _ = tx.send(cmd.to_string());
+        }
+    }
+}
+
+static COVER_CACHE: std::sync::Mutex<Option<std::collections::HashMap<String, Vec<u8>>>> = std::sync::Mutex::new(None);
+
+pub fn get_cached_cover(url: &str) -> Option<Vec<u8>> {
+    if let Ok(guard) = COVER_CACHE.lock() {
+        if let Some(ref map) = *guard {
+            return map.get(url).cloned();
+        }
+    }
+    None
+}
+
+pub fn save_cached_cover(url: String, bytes: Vec<u8>) {
+    if let Ok(mut guard) = COVER_CACHE.lock() {
+        let map = guard.get_or_insert_with(std::collections::HashMap::new);
+        if map.len() > 50 {
+            map.clear();
+        }
+        map.insert(url, bytes);
+    }
+}
+
+fn fetch_curl_bytes(url: &str) -> Option<Vec<u8>> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
+    let output = std::process::Command::new("curl.exe")
+        .args(["-s", "-L", "--max-time", "3", url])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    if output.status.success() && !output.stdout.is_empty() {
+        Some(output.stdout)
+    } else {
+        None
+    }
+}
+
+fn fetch_cover_bytes(url: &str) -> Option<Vec<u8>> {
+    let clean = url.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    if let Some(cached) = get_cached_cover(clean) {
+        return Some(cached);
+    }
+
+    let bytes = if clean.starts_with("http://") || clean.starts_with("https://") {
+        let mut target_url = clean.to_string();
+        if target_url.contains("googleusercontent.com") {
+            if target_url.contains("-rw") {
+                target_url = target_url.replace("-rw", "-rj");
+            } else if !target_url.contains("-rj") {
+                if target_url.contains('=') {
+                    target_url.push_str("-rj");
+                } else {
+                    target_url.push_str("=w512-h512-l90-rj");
+                }
+            }
+        }
+        fetch_curl_bytes(&target_url).or_else(|| fetch_curl_bytes(clean))
+    } else if let Some(path) = clean.strip_prefix("file:///") {
+        std::fs::read(path).ok()
+    } else if let Some(path) = clean.strip_prefix("file://") {
+        std::fs::read(path).ok()
+    } else if std::path::Path::new(clean).exists() {
+        std::fs::read(clean).ok()
+    } else {
+        None
+    };
+
+    if let Some(ref b) = bytes {
+        save_cached_cover(clean.to_string(), b.clone());
+    }
+    bytes
+}
+
+fn handle_ytmpx_json(text: &str, sender: &Sender<MediaEvent>) -> Option<String> {
+    let payload = serde_json::from_str::<RawYtmpxPayload>(text).ok()?;
+    if payload.command.is_some() {
+        return None;
+    }
+
+    let event = payload.event.as_deref().unwrap_or("");
+    if event == "stop" || event == "pause" {
+        let _ = sender.send(MediaEvent::PlaybackState(false));
+        return None;
+    } else if event == "resume" {
+        let _ = sender.send(MediaEvent::PlaybackState(true));
+        return None;
+    }
+
+    if let Some(meta) = payload.metadata {
+        let title = meta.title.unwrap_or_default().trim().to_string();
+        if !title.is_empty() {
+            let artist = meta.author.or(meta.artist).unwrap_or_default().trim().to_string();
+            let album = meta.album.unwrap_or_default();
+            let art_url = meta.image.or(meta.thumbnail).or(meta.cover).or(meta.art)
+                .or(payload.image).or(payload.thumbnail).or(payload.cover).or(payload.art)
+                .unwrap_or_default();
+
+            let is_playing = payload.is_playing.unwrap_or_else(|| {
+                meta.status.as_deref() != Some("paused")
+            });
+
+            let notif = Notification {
+                app_name: "YouTube Music".to_string(),
+                title: title.clone(),
+                body: if !artist.is_empty() { artist } else if !album.is_empty() { album } else { "YouTube Music".to_string() },
+                time_str: "♪".to_string(),
+                badge_letter: "▶".to_string(),
+                badge_color: (0.95, 0.10, 0.10),
+            };
+
+            let cached_thumb = if !art_url.is_empty() {
+                get_cached_cover(&art_url)
+            } else {
+                None
+            };
+
+            let _ = sender.send(MediaEvent::TrackChanged {
+                notif,
+                thumbnail_bytes: cached_thumb,
+            });
+            let _ = sender.send(MediaEvent::PlaybackState(is_playing));
+
+            if !art_url.is_empty() {
+                return Some(art_url);
+            }
+        }
+    }
+    None
+}
+
+fn start_ytmpx_bridge(sender: Sender<MediaEvent>) {
+    let (cmd_tx, cmd_rx) = std::sync::mpsc::channel::<String>();
+    if let Ok(mut guard) = YTMPX_CMD_TX.lock() {
+        *guard = Some(cmd_tx);
+    }
+
+    thread::spawn(move || {
+        let mut clients: Vec<tungstenite::WebSocket<std::net::TcpStream>> = Vec::new();
+        let mut last_art_url = String::new();
+
+        loop {
+            // 1. Try to bind as WebSocket server on 127.0.0.1:8765
+            if let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:8765") {
+                let _ = listener.set_nonblocking(true);
+
+                loop {
+                    // Accept new incoming WebSocket client connections
+                    if let Ok((stream, _)) = listener.accept() {
+                        let _ = stream.set_nonblocking(false);
+                        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+                        if let Ok(ws) = tungstenite::accept(stream) {
+                            let _ = ws.get_ref().set_read_timeout(Some(Duration::from_millis(15)));
+                            clients.push(ws);
+                            YTMPX_CONNECTED.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+
+                    if clients.is_empty() {
+                        YTMPX_CONNECTED.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+
+                    // Forward pending commands to all connected clients
+                    while let Ok(cmd) = cmd_rx.try_recv() {
+                        let payload = format!(r#"{{"command":"{}"}}"#, cmd);
+                        clients.retain_mut(|c| c.send(tungstenite::Message::text(&payload)).is_ok());
+                    }
+
+                    // Read incoming messages
+                    let s = sender.clone();
+                    let mut url_to_fetch: Option<String> = None;
+                    clients.retain_mut(|c| {
+                        loop {
+                            match c.read() {
+                                Ok(msg) => {
+                                    if let Ok(text) = msg.to_text() {
+                                        if let Some(art) = handle_ytmpx_json(text, &s) {
+                                            url_to_fetch = Some(art);
+                                        }
+                                    }
+                                }
+                                Err(tungstenite::Error::Io(ref e))
+                                    if e.kind() == std::io::ErrorKind::WouldBlock
+                                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                                {
+                                    return true;
+                                }
+                                Err(_) => return false,
+                            }
+                        }
+                    });
+
+                    if let Some(art) = url_to_fetch {
+                        if art != last_art_url {
+                            last_art_url = art.clone();
+                            let s_art = sender.clone();
+                            thread::spawn(move || {
+                                if let Some(bytes) = fetch_cover_bytes(&art) {
+                                    let _ = s_art.send(MediaEvent::ThumbnailLoaded(bytes));
+                                }
+                            });
+                        } else if let Some(cached) = get_cached_cover(&art) {
+                            let _ = sender.send(MediaEvent::ThumbnailLoaded(cached));
+                        }
+                    }
+
+                    thread::sleep(Duration::from_millis(40));
+                }
+            } else {
+                // Port 8765 already bound: connect as client
+                if let Ok(stream) = std::net::TcpStream::connect("127.0.0.1:8765") {
+                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+                    if let Ok((mut ws, _)) = tungstenite::client("ws://127.0.0.1:8765", stream) {
+                        let _ = ws.get_ref().set_read_timeout(Some(Duration::from_millis(15)));
+                        YTMPX_CONNECTED.store(true, std::sync::atomic::Ordering::Relaxed);
+                        loop {
+                            while let Ok(cmd) = cmd_rx.try_recv() {
+                                let payload = format!(r#"{{"command":"{}"}}"#, cmd);
+                                if ws.send(tungstenite::Message::text(&payload)).is_err() {
+                                    break;
+                                }
+                            }
+                            match ws.read() {
+                                Ok(msg) => {
+                                    if let Ok(text) = msg.to_text() {
+                                        if let Some(art) = handle_ytmpx_json(text, &sender) {
+                                            if art != last_art_url {
+                                                last_art_url = art.clone();
+                                                let s_art = sender.clone();
+                                                thread::spawn(move || {
+                                                    if let Some(bytes) = fetch_cover_bytes(&art) {
+                                                        let _ = s_art.send(MediaEvent::ThumbnailLoaded(bytes));
+                                                    }
+                                                });
+                                            } else if let Some(cached) = get_cached_cover(&art) {
+                                                let _ = sender.send(MediaEvent::ThumbnailLoaded(cached));
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(tungstenite::Error::Io(ref e))
+                                    if e.kind() == std::io::ErrorKind::WouldBlock
+                                        || e.kind() == std::io::ErrorKind::TimedOut => {}
+                                Err(_) => break,
+                            }
+                            thread::sleep(Duration::from_millis(40));
+                        }
+                        YTMPX_CONNECTED.store(false, std::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+
+            thread::sleep(Duration::from_millis(1500));
+        }
+    });
+}
+
+static LAST_MEDIA_CMD_TIME: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Sends media transport commands (Play/Pause, Next, Previous) to Windows GSMTC or YTMPX.
+/// Debounced and single-routed to strictly prevent accidental double-clicks or dual-dispatch double-skipping!
 pub fn send_media_command(cmd: MediaCommand) {
+    // 1. Debounce check (250ms threshold to prevent hardware/rapid double-triggering)
+    if let Ok(mut last) = LAST_MEDIA_CMD_TIME.lock() {
+        let now = std::time::Instant::now();
+        if let Some(prev) = *last {
+            if now.duration_since(prev) < std::time::Duration::from_millis(250) {
+                return;
+            }
+        }
+        *last = Some(now);
+    }
+
+    // 2. If YTMPX WebSocket is connected (e.g. Tauri YouTube Music):
+    // Dispatch exclusively through WebSocket and return immediately!
+    // NEVER send both WebSocket AND GSMTC simultaneously, otherwise the player skips 2 tracks!
+    if is_ytmpx_connected() {
+        match cmd {
+            MediaCommand::TogglePlayPause => send_ytmpx_command("playPause"),
+            MediaCommand::Previous => send_ytmpx_command("prev"),
+            MediaCommand::Next => send_ytmpx_command("next"),
+        }
+        return;
+    }
+
+    // 3. Fallback: Dispatch through Windows GSMTC
     thread::spawn(move || {
         let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
             Ok(op) => match wait_async(op) {
@@ -140,6 +485,9 @@ pub fn send_media_command(cmd: MediaCommand) {
 
 /// Listens for currently playing media in Windows (Spotify, YouTube Music, etc.)
 pub fn start_media_listener(sender: Sender<MediaEvent>) {
+    // Start YTMPX bridge in parallel
+    start_ytmpx_bridge(sender.clone());
+
     thread::spawn(move || {
         let mut last_title = String::new();
         let mut last_artist = String::new();
@@ -204,32 +552,7 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
                                     .unwrap_or_default();
                                 let raw_source = source_id.to_lowercase();
 
-                                let is_music = raw_source.contains("spotify")
-                                    || raw_source.contains("music")
-                                    || !album.is_empty();
-
-                                let app_name = if raw_source.contains("spotify") {
-                                    "Spotify".to_string()
-                                } else if is_music {
-                                    "YouTube Music".to_string()
-                                } else if raw_source.contains("chrome")
-                                    || raw_source.contains("edge")
-                                    || raw_source.contains("brave")
-                                {
-                                    "YouTube".to_string()
-                                } else if !source_id.is_empty() {
-                                    crate::notifications::clean_app_name(&source_id)
-                                } else {
-                                    "Media Player".to_string()
-                                };
-
-                                let badge_color = if app_name.contains("Spotify") {
-                                    (0.114, 0.725, 0.329)
-                                } else if app_name.contains("Music") {
-                                    (0.95, 0.10, 0.10)
-                                } else {
-                                    (1.0, 0.18, 0.18)
-                                };
+                                let (app_name, badge_color) = detect_media_service(&raw_source, &title, &artist, &album);
 
                                 let notif = Notification {
                                     app_name,
@@ -243,7 +566,7 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
                                     } else {
                                         artist.clone()
                                     },
-                                    time_str: "♫".to_string(),
+                                    time_str: "♪".to_string(),
                                     badge_letter: "▶".to_string(),
                                     badge_color,
                                 };
@@ -265,4 +588,469 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
             }
         }
     });
+}
+
+// =========================================================================
+// Focus / Activate Media Player Window (YouTube, Spotify, Browser Tab, Video)
+// =========================================================================
+
+pub fn detect_media_service(
+    raw_source: &str,
+    title: &str,
+    artist: &str,
+    album: &str,
+) -> (String, (f32, f32, f32)) {
+    let lower_src = raw_source.to_lowercase();
+    let lower_title = title.to_lowercase();
+    let lower_artist = artist.to_lowercase();
+    let lower_album = album.to_lowercase();
+
+    // 1. Direct App Check (Desktop apps, PWA, or specific UWP IDs)
+    if lower_src.contains("spotify") || lower_title.contains("spotify") || lower_artist.contains("spotify") {
+        return ("Spotify".to_string(), (0.114, 0.725, 0.329));
+    }
+    if lower_src.contains("netflix") || lower_title.contains("netflix") || lower_artist.contains("netflix") || lower_album.contains("netflix") {
+        return ("Netflix".to_string(), (0.898, 0.035, 0.078));
+    }
+    if lower_src.contains("tauri") || lower_src.contains("ytm") {
+        return ("YouTube Music".to_string(), (0.95, 0.10, 0.10));
+    }
+    if lower_src.contains("applemusic") || lower_src.contains("cider") {
+        return ("Apple Music".to_string(), (0.98, 0.20, 0.35));
+    }
+    if lower_src.contains("deezer") {
+        return ("Deezer".to_string(), (0.65, 0.25, 0.90));
+    }
+    if lower_src.contains("tidal") {
+        return ("Tidal".to_string(), (0.0, 0.0, 0.0));
+    }
+
+    // 2. Browser Media Check
+    let is_browser = lower_src.contains("chrome")
+        || lower_src.contains("edge")
+        || lower_src.contains("brave")
+        || lower_src.contains("firefox")
+        || lower_src.contains("opera")
+        || lower_src.contains("vivaldi");
+
+    if is_browser {
+        // Enumerate open browser windows to inspect active tab titles!
+        let mut found_service: Option<(&'static str, (f32, f32, f32))> = None;
+        unsafe {
+            let _ = EnumWindows(
+                Some(enum_detect_browser_service),
+                LPARAM(&mut found_service as *mut _ as isize),
+            );
+        }
+        if let Some((name, color)) = found_service {
+            return (name.to_string(), color);
+        }
+
+        // Check metadata keywords
+        if lower_title.contains("netflix") || lower_artist.contains("netflix") {
+            return ("Netflix".to_string(), (0.898, 0.035, 0.078));
+        }
+        if lower_title.contains("youtube music") || lower_album.contains("youtube music") {
+            return ("YouTube Music".to_string(), (0.95, 0.10, 0.10));
+        }
+        if lower_title.contains("youtube") || lower_artist.contains("youtube") {
+            return ("YouTube".to_string(), (1.0, 0.18, 0.18));
+        }
+        if lower_title.contains("soundcloud") {
+            return ("SoundCloud".to_string(), (1.0, 0.45, 0.0));
+        }
+        if lower_title.contains("twitch") {
+            return ("Twitch".to_string(), (0.57, 0.28, 0.93));
+        }
+        if lower_title.contains("bilibili") {
+            return ("Bilibili".to_string(), (0.14, 0.75, 0.90));
+        }
+        if lower_title.contains("disney") {
+            return ("Disney+".to_string(), (0.12, 0.25, 0.70));
+        }
+        if lower_title.contains("prime video") {
+            return ("Prime Video".to_string(), (0.0, 0.65, 0.90));
+        }
+        if !album.is_empty() {
+            return ("YouTube Music".to_string(), (0.95, 0.10, 0.10));
+        }
+
+        // Fallback for browsers: Use the actual browser name rather than falsely branding it YouTube!
+        if lower_src.contains("edge") {
+            return ("Microsoft Edge".to_string(), (0.0, 0.471, 0.831));
+        }
+        if lower_src.contains("chrome") {
+            return ("Google Chrome".to_string(), (0.26, 0.52, 0.96));
+        }
+        if lower_src.contains("firefox") {
+            return ("Firefox".to_string(), (1.0, 0.44, 0.12));
+        }
+        if lower_src.contains("brave") {
+            return ("Brave".to_string(), (1.0, 0.33, 0.13));
+        }
+        return ("Web Media".to_string(), (0.20, 0.65, 1.0));
+    }
+
+    if !raw_source.is_empty() {
+        (crate::notifications::clean_app_name(raw_source), (0.20, 0.65, 1.0))
+    } else {
+        ("Media Player".to_string(), (0.20, 0.65, 1.0))
+    }
+}
+
+unsafe extern "system" fn enum_detect_browser_service(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    if !IsWindowVisible(hwnd).as_bool() {
+        return BOOL(1);
+    }
+    let mut title_buf = [0u16; 512];
+    let len = GetWindowTextW(hwnd, &mut title_buf) as usize;
+    if len == 0 {
+        return BOOL(1);
+    }
+    let title = String::from_utf16_lossy(&title_buf[..len]).to_lowercase();
+
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    let exe = get_process_name(pid).to_lowercase();
+
+    let is_browser = exe.contains("chrome")
+        || exe.contains("msedge")
+        || exe.contains("brave")
+        || exe.contains("firefox")
+        || exe.contains("opera")
+        || exe.contains("vivaldi");
+
+    if is_browser {
+        let out = &mut *(lparam.0 as *mut Option<(&'static str, (f32, f32, f32))>);
+        if title.contains("netflix") {
+            *out = Some(("Netflix", (0.898, 0.035, 0.078)));
+            return BOOL(0);
+        }
+        if title.contains("spotify") {
+            *out = Some(("Spotify", (0.114, 0.725, 0.329)));
+            return BOOL(0);
+        }
+        if title.contains("youtube music") {
+            *out = Some(("YouTube Music", (0.95, 0.10, 0.10)));
+            return BOOL(0);
+        }
+        if title.contains("youtube") {
+            *out = Some(("YouTube", (1.0, 0.18, 0.18)));
+            return BOOL(0);
+        }
+        if title.contains("twitch") {
+            *out = Some(("Twitch", (0.57, 0.28, 0.93)));
+            return BOOL(0);
+        }
+        if title.contains("soundcloud") {
+            *out = Some(("SoundCloud", (1.0, 0.45, 0.0)));
+            return BOOL(0);
+        }
+        if title.contains("bilibili") {
+            *out = Some(("Bilibili", (0.14, 0.75, 0.90)));
+            return BOOL(0);
+        }
+        if title.contains("disney") {
+            *out = Some(("Disney+", (0.12, 0.25, 0.70)));
+            return BOOL(0);
+        }
+        if title.contains("prime video") {
+            *out = Some(("Prime Video", (0.0, 0.65, 0.90)));
+            return BOOL(0);
+        }
+    }
+    BOOL(1)
+}
+
+struct WindowFindContext<'a> {
+    found: Option<HWND>,
+    track_title: Option<&'a str>,
+    fallback_browser: Option<HWND>,
+}
+
+unsafe extern "system" fn enum_music_windows(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    if !IsWindow(Some(hwnd)).as_bool() || (!IsWindowVisible(hwnd).as_bool() && !IsIconic(hwnd).as_bool()) {
+        return BOOL(1);
+    }
+
+    let mut title_buf = [0u16; 512];
+    let len = GetWindowTextW(hwnd, &mut title_buf) as usize;
+    if len == 0 {
+        return BOOL(1);
+    }
+    let title = String::from_utf16_lossy(&title_buf[..len]).to_lowercase();
+
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    let exe = get_process_name(pid).to_lowercase();
+
+    let ctx = &mut *(lparam.0 as *mut WindowFindContext<'_>);
+
+    // 1. Direct match on track title in window title
+    // Supports YouTube videos ("Call My Name Again | Full Cover - YouTube"), Spotify Web,
+    // Twitter / X video, Facebook video, Twitch, etc.!
+    if let Some(track) = ctx.track_title {
+        let clean = track.trim().to_lowercase();
+        if !clean.is_empty() {
+            if title.contains(&clean) {
+                ctx.found = Some(hwnd);
+                return BOOL(0);
+            }
+            // Check first segment before delimiters
+            for delim in &['|', '—', '-', '•', ':'] {
+                if let Some(part) = clean.split(*delim).next() {
+                    let p = part.trim();
+                    if p.len() >= 4 && title.contains(p) {
+                        ctx.found = Some(hwnd);
+                        return BOOL(0);
+                    }
+                }
+            }
+            // Check prefix
+            let prefix: String = clean.chars().take(18).collect();
+            if prefix.len() >= 6 && title.contains(&prefix) {
+                ctx.found = Some(hwnd);
+                return BOOL(0);
+            }
+        }
+    }
+
+    // 2. YouTube Music (Tauri desktop app, Chrome/Edge PWA, or browser tab)
+    if title.contains("youtube music") || exe.contains("youtube music") || exe.contains("ytm") || exe.contains("tauri") {
+        ctx.found = Some(hwnd);
+        return BOOL(0);
+    }
+
+    // 3. Spotify (Desktop app or web player)
+    if title.contains("spotify") || exe.contains("spotify") {
+        ctx.found = Some(hwnd);
+        return BOOL(0);
+    }
+
+    // 4. Apple Music, Cider, Deezer, Tidal, Foobar2000, AIMP, VLC
+    if title.contains("apple music")
+        || title.contains("cider")
+        || title.contains("tidal")
+        || exe.contains("foobar2000")
+        || exe.contains("aimp")
+        || exe.contains("vlc")
+    {
+        ctx.found = Some(hwnd);
+        return BOOL(0);
+    }
+
+    // 5. Browser media windows (YouTube, Twitch, Twitter/X, Facebook)
+    let is_browser = exe.contains("chrome")
+        || exe.contains("msedge")
+        || exe.contains("brave")
+        || exe.contains("firefox")
+        || exe.contains("opera")
+        || exe.contains("vivaldi");
+
+    if is_browser {
+        if title.contains("youtube")
+            || title.contains("twitch")
+            || title.contains("twitter")
+            || title.contains("x.com")
+            || title.contains("facebook")
+        {
+            if ctx.found.is_none() {
+                ctx.found = Some(hwnd);
+                return BOOL(0);
+            }
+        }
+        if ctx.fallback_browser.is_none() {
+            let mut rc = RECT::default();
+            let _ = GetWindowRect(hwnd, &mut rc);
+            if (rc.right - rc.left) > 300 && (rc.bottom - rc.top) > 200 {
+                ctx.fallback_browser = Some(hwnd);
+            }
+        }
+    }
+
+    BOOL(1)
+}
+
+pub fn get_process_name(pid: u32) -> String {
+    if pid == 0 {
+        return String::new();
+    }
+    unsafe {
+        if let Ok(handle) = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) {
+            let mut buf = [0u16; 512];
+            let mut len = buf.len() as u32;
+            let ok = QueryFullProcessImageNameW(
+                handle,
+                PROCESS_NAME_WIN32,
+                PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            ).is_ok();
+            let _ = CloseHandle(handle);
+            if ok && len > 0 {
+                let full = String::from_utf16_lossy(&buf[..len as usize]);
+                if let Some(name) = full.rsplit(|c| c == '\\' || c == '/').next() {
+                    return name.to_string();
+                }
+            }
+        }
+    }
+    String::new()
+}
+
+/// Reliably activates or toggles the media player application window (YouTube Music, Spotify, or playing browser tab).
+/// Bypasses Windows 11 foreground lock restriction.
+pub fn bring_or_toggle_media_window(hwnd: HWND) {
+    unsafe {
+        let fg = GetForegroundWindow();
+        if fg == hwnd {
+            // If already the foreground active window, minimize it!
+            let _ = ShowWindow(hwnd, SW_MINIMIZE);
+            return;
+        }
+
+        // Restore if minimized, or show if hidden
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        } else {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
+
+        let cur_thread = GetCurrentThreadId();
+        let fg_thread = GetWindowThreadProcessId(fg, None);
+
+        // Win32 Foreground lock bypass trick using AttachThreadInput
+        if fg_thread != 0 && fg_thread != cur_thread {
+            let _ = AttachThreadInput(cur_thread, fg_thread, true);
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+            let _ = AttachThreadInput(cur_thread, fg_thread, false);
+        } else {
+            let _ = BringWindowToTop(hwnd);
+            let _ = SetForegroundWindow(hwnd);
+            let _ = SetFocus(Some(hwnd));
+        }
+
+        // SwitchToThisWindow forces Windows task switch to the window
+        SwitchToThisWindow(hwnd, true);
+    }
+}
+
+fn find_tauri_window() -> Option<HWND> {
+    let mut found: Option<HWND> = None;
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_find_tauri_window),
+            LPARAM(&mut found as *mut _ as isize),
+        );
+    }
+    found
+}
+
+unsafe extern "system" fn enum_find_tauri_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    if !IsWindow(Some(hwnd)).as_bool() {
+        return BOOL(1);
+    }
+    let is_vis = IsWindowVisible(hwnd).as_bool();
+    let is_ico = IsIconic(hwnd).as_bool();
+    if !is_vis && !is_ico {
+        return BOOL(1);
+    }
+
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid == 0 {
+        return BOOL(1);
+    }
+    let exe = get_process_name(pid).to_lowercase();
+
+    // Never match web browsers when hunting for dedicated Tauri / YTM desktop window
+    let is_browser = exe.contains("chrome")
+        || exe.contains("msedge")
+        || exe.contains("brave")
+        || exe.contains("firefox")
+        || exe.contains("opera")
+        || exe.contains("vivaldi");
+    if is_browser {
+        return BOOL(1);
+    }
+
+    let mut title_buf = [0u16; 512];
+    let len = GetWindowTextW(hwnd, &mut title_buf) as usize;
+    let title = String::from_utf16_lossy(&title_buf[..len]).to_lowercase();
+
+    // Ignore generic YouTube videos/podcasts
+    if title.contains(" - youtube") && !title.contains("youtube music") {
+        return BOOL(1);
+    }
+
+    let is_match = exe.contains("tauri")
+        || exe.contains("youtube music")
+        || exe.contains("ytm")
+        || title.contains("youtube music");
+
+    if is_match {
+        let mut rc = RECT::default();
+        let _ = GetWindowRect(hwnd, &mut rc);
+        if is_ico || ((rc.right - rc.left) > 150 && (rc.bottom - rc.top) > 100) {
+            let out = &mut *(lparam.0 as *mut Option<HWND>);
+            *out = Some(hwnd);
+            return BOOL(0);
+        }
+    }
+    BOOL(1)
+}
+
+/// Activates or toggles the music player application window (YouTube Music Tauri, Spotify, or playing browser tab).
+pub fn activate_or_toggle_media_player(track: Option<&crate::island::TrackInfo>) {
+    let is_spotify = track.map(|t| {
+        let s = t.source.to_lowercase();
+        s.contains("spotify")
+    }).unwrap_or(false);
+
+    let is_ytm = track.map(|t| {
+        let s = t.source.to_lowercase();
+        s.contains("tauri") || s.contains("ytm") || s.contains("youtube music")
+    }).unwrap_or(false);
+
+    // 1. If Tauri YouTube Music (YTMPX) is connected:
+    // Send toggleMusicWindow directly so Tauri natively toggles/restores from tray.
+    if !is_spotify {
+        send_ytmpx_command("toggleMusicWindow");
+        if is_ytmpx_connected() {
+            return;
+        }
+    }
+
+    // 2. Also check if dedicated Tauri / YTM desktop window exists on screen
+    if !is_spotify {
+        if let Some(hwnd) = find_tauri_window() {
+            bring_or_toggle_media_window(hwnd);
+            return;
+        }
+        // If track is explicitly from Tauri/YTM desktop app, NEVER mistakenly focus a random browser window!
+        if is_ytm {
+            return;
+        }
+    }
+
+    // 3. Fallback: Locate Spotify or playing browser tab (YouTube video, Twitter, FB)
+    let mut ctx = WindowFindContext {
+        found: None,
+        track_title: track.map(|t| t.title.as_str()),
+        fallback_browser: None,
+    };
+
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_music_windows),
+            LPARAM(&mut ctx as *mut _ as isize),
+        );
+    }
+
+    let target_hwnd = ctx.found.or(ctx.fallback_browser);
+
+    if let Some(hwnd) = target_hwnd {
+        bring_or_toggle_media_window(hwnd);
+    }
 }

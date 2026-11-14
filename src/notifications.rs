@@ -20,6 +20,8 @@ pub fn clean_app_name(raw: &str) -> String {
         return "Telegram".to_string();
     } else if lower.contains("spotify") {
         return "Spotify".to_string();
+    } else if lower.contains("netflix") {
+        return "Netflix".to_string();
     } else if lower.contains("youtubemusic") || lower.contains("youtube music") {
         return "YouTube Music".to_string();
     } else if lower.contains("youtube") {

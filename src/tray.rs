@@ -55,18 +55,14 @@ pub unsafe fn remove_tray_icon(hwnd: HWND) {
 pub unsafe fn show_tray_menu(hwnd: HWND) -> Result<()> {
     let hmenu = CreatePopupMenu()?;
 
-    AppendMenuW(hmenu, MF_STRING, ID_TRAY_SETTINGS, w!("⚙ Settings..."))?;
+    AppendMenuW(hmenu, MF_STRING, ID_TRAY_SETTINGS, w!("Settings..."))?;
 
     let is_auto = crate::config::is_autostart_enabled();
-    let auto_text = if is_auto {
-        w!("✓ Start with Windows")
-    } else {
-        w!("  Start with Windows")
-    };
-    AppendMenuW(hmenu, MF_STRING, ID_TRAY_STARTUP, auto_text)?;
+    let check_flag = if is_auto { MF_CHECKED } else { MF_UNCHECKED };
+    AppendMenuW(hmenu, MF_STRING | check_flag, ID_TRAY_STARTUP, w!("Start with Windows"))?;
 
     AppendMenuW(hmenu, MF_SEPARATOR, 0, PCWSTR::null())?;
-    AppendMenuW(hmenu, MF_STRING, ID_TRAY_EXIT, w!("❌ Exit Dynamic Island"))?;
+    AppendMenuW(hmenu, MF_STRING, ID_TRAY_EXIT, w!("Exit"))?;
 
     let mut pt = POINT::default();
     let _ = GetCursorPos(&mut pt);
