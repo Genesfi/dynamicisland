@@ -1,0 +1,14 @@
+# Dynamic Island Settings
+top_margin=12
+auto_collapse_secs=5.5
+island_style=sleek
+island_opacity=0.76
+glow_intensity=0.81
+vinyl_speed=0.50
+compact_mode_view=wave
+dynamic_album_color=true
+enable_media_island=true
+enable_vinyl_animation=true
+hover_expand_media=true
+idle_click_through=true
+start_with_windows=true
