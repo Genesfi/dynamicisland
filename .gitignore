@@ -1,1 +1,28 @@
-/target
+# Rust Build Artifacts
+/target/
+**/*.rs.bk
+*.pdb
+*.ilk
+
+# Temporary Binaries & Logs
+*.tmp
+*.old
+*.log
+error.log
+
+# IDE & Editor Files
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Windows System Files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# Python Cache
+__pycache__/
+*.py[cod]
+*$py.class
