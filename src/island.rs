@@ -10,6 +10,8 @@ pub struct Notification {
     pub time_str: String,
     pub badge_letter: String,
     pub badge_color: (f32, f32, f32), // RGB [0.0, 1.0]
+    pub icon_bytes: Option<Vec<u8>>,
+    pub aumid: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -19,13 +21,16 @@ pub struct TrackInfo {
     pub is_playing: bool,
     pub thumbnail_bytes: Option<Vec<u8>>,
     pub source: String,
+    pub position_secs: f32,
+    pub duration_secs: f32,
 }
 
 #[derive(Debug, PartialEq, Eq, Copy, Clone)]
 pub enum IslandMode {
     Idle,
     Slim,      // Stage 1: Ultra-slim horizontal strip (height 30px, wide horizontal)
-    Expanded,  // Stage 2: Full rich card on hover (height 50-74px)
+    Expanded,  // Stage 2: Sleek capsule on hover (height 50-74px)
+    FullCard,  // Stage 3: Full Media Control Card with seek slider & volume (height 128px, width 380px)
 }
 
 pub struct Island {
@@ -51,6 +56,9 @@ pub struct Island {
     pub compact_mode_view: crate::config::CompactDisplayMode,
     pub compact_music_width: f32,
     pub island_style: crate::config::IslandStyle,
+    pub volume: f32,
+    pub use_full_media_card: bool,
+    pub hover_leave_timer: f32,
 }
 
 pub const IDLE_WIDTH: f32 = 148.0;
@@ -59,6 +67,10 @@ pub const IDLE_RADIUS: f32 = 14.0;
 
 pub const SLIM_HEIGHT: f32 = 30.0;
 pub const SLIM_RADIUS: f32 = 15.0;
+
+pub const FULL_CARD_WIDTH: f32 = 460.0;
+pub const FULL_CARD_HEIGHT: f32 = 132.0;
+pub const FULL_CARD_RADIUS: f32 = 24.0;
 
 impl Island {
     pub fn new(window_width: f32, window_height: f32) -> Self {
@@ -86,6 +98,9 @@ impl Island {
             compact_mode_view: crate::config::CompactDisplayMode::Combined,
             compact_music_width: 260.0,
             island_style: crate::config::IslandStyle::SleekCapsule,
+            volume: 0.5,
+            use_full_media_card: false,
+            hover_leave_timer: 0.0,
         }
     }
 
@@ -114,14 +129,41 @@ impl Island {
     }
 
     pub fn expand_full(&mut self) {
+        if self.use_full_media_card && (self.is_media_playing || self.current_track.is_some()) {
+            self.expand_full_card();
+        } else {
+            self.expand_capsule();
+        }
+    }
+
+    pub fn expand_capsule(&mut self) {
         self.mode = IslandMode::Expanded;
         self.remaining_time = 5.0;
+        self.hover_leave_timer = 0.0;
 
         let (target_w, target_h, target_r) = self.island_style.dimensions();
         self.width_spring.set_target(target_w);
         self.height_spring.set_target(target_h);
         self.radius_spring.set_target(target_r);
         self.alpha_spring.set_target(1.0);
+    }
+
+    pub fn expand_full_card(&mut self) {
+        self.mode = IslandMode::FullCard;
+        self.remaining_time = 5.0;
+        self.hover_leave_timer = 0.0;
+        self.width_spring.set_target(FULL_CARD_WIDTH);
+        self.height_spring.set_target(FULL_CARD_HEIGHT);
+        self.radius_spring.set_target(FULL_CARD_RADIUS);
+        self.alpha_spring.set_target(1.0);
+    }
+
+    pub fn toggle_full_card(&mut self) {
+        if self.mode == IslandMode::FullCard {
+            self.expand_capsule();
+        } else {
+            self.expand_full_card();
+        }
     }
 
     pub fn expand_media(&mut self) {
@@ -161,12 +203,31 @@ impl Island {
                 self.vinyl_rotation -= std::f32::consts::PI * 2.0;
             }
             self.marquee_offset += dt * 38.0;
+
+            if let Some(ref mut track) = self.current_track {
+                track.position_secs += dt;
+                if track.duration_secs > 0.0 && track.position_secs > track.duration_secs {
+                    track.position_secs = track.duration_secs;
+                }
+            }
         }
 
-        // Snappy auto-collapse when cursor leaves hover
-        if !self.is_hovered {
-            if self.mode == IslandMode::Expanded {
-                self.dismiss();
+        // Graceful auto-collapse when cursor leaves hover with hysteresis delay
+        if self.is_hovered {
+            self.hover_leave_timer = 0.0;
+        } else {
+            self.hover_leave_timer += dt;
+
+            // For Expanded capsule: 0.35s delay (prevents flicker if cursor moves past border)
+            // For FullCard view: 1.5s delay (allows comfortable interaction without vanishing)
+            let max_leave = if self.mode == IslandMode::FullCard { 1.5 } else { 0.35 };
+
+            let is_animating = !self.width_spring.is_settled() || !self.height_spring.is_settled();
+
+            if (self.mode == IslandMode::Expanded || self.mode == IslandMode::FullCard) && !is_animating {
+                if self.hover_leave_timer >= max_leave {
+                    self.dismiss();
+                }
             }
 
             if self.mode == IslandMode::Slim && self.remaining_time > 0.0 {
@@ -213,10 +274,12 @@ impl Island {
         let local_y = (screen_y - win_y) as f32;
 
         let (left, top, right, bottom) = self.get_pill_rect();
+        // Generous 10px buffer around borders ensures hover isn't lost during fast animations or near rounded corners
+        let pad = 10.0;
 
-        local_x >= left
-            && local_x <= right
-            && local_y >= top
-            && local_y <= bottom
+        local_x >= (left - pad)
+            && local_x <= (right + pad)
+            && local_y >= (top - pad)
+            && local_y <= (bottom + pad)
     }
 }

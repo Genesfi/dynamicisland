@@ -307,8 +307,8 @@ impl Renderer {
                 brush_accent,
                 accent_color: (0.20, 0.75, 1.0),
                 album_art: None,
+                icon_manager: crate::icons::IconManager::new(wic_factory.clone()),
                 wic_factory,
-                icon_manager: crate::icons::IconManager::new()?,
                 cached_is_light: false,
                 lum_frame_counter: 0,
             })
@@ -508,6 +508,73 @@ impl Renderer {
                 a: 0.85 * alpha,
             });
             self.d2d_context.DrawRoundedRectangle(&badge_rect, &self.brush_border, 1.2, None);
+        }
+    }
+
+    /// Renders the app notification badge: prioritizes album art, bespoke vector brand badges,
+    /// real extracted Windows application icons, and finally fallback initial letter squircles.
+    fn draw_notification_badge(
+        &mut self,
+        notif: &crate::island::Notification,
+        is_media_notif: bool,
+        cx: f32,
+        cy: f32,
+        radius: f32,
+        alpha: f32,
+    ) {
+        // 1. If it's a media notification and we have album art, draw the album art!
+        if is_media_notif {
+            if let Some(art) = &self.album_art {
+                self.draw_album_art_badge(art, cx, cy, radius, alpha);
+                return;
+            }
+        }
+
+        // 2. If it's one of our bespoke vector brand badges (Netflix, YouTube, Discord, WhatsApp, Spotify, Telegram, Edge)
+        let lower = notif.app_name.to_lowercase();
+        let is_bespoke_vector = lower.contains("netflix")
+            || lower.contains("youtube")
+            || lower.contains("discord")
+            || lower.contains("whatsapp")
+            || lower.contains("spotify")
+            || lower.contains("telegram")
+            || lower.contains("edge")
+            || (lower.contains("music") && !lower.contains("amazon"));
+
+        if is_bespoke_vector {
+            self.draw_vector_app_icon(
+                &notif.app_name,
+                cx,
+                cy,
+                radius,
+                &notif.badge_letter,
+                notif.badge_color,
+                alpha,
+            );
+            return;
+        }
+
+        // 3. For all other apps: retrieve real application icon!
+        let real_icon = self.icon_manager.get_icon(
+            &self.d2d_context,
+            &notif.app_name,
+            notif.aumid.as_deref(),
+            notif.icon_bytes.as_deref(),
+        );
+
+        if let Some(ref bmp) = real_icon {
+            self.draw_album_art_badge(bmp, cx, cy, radius, alpha);
+        } else {
+            // 4. Fallback to letter squircle
+            self.draw_vector_app_icon(
+                &notif.app_name,
+                cx,
+                cy,
+                radius,
+                &notif.badge_letter,
+                notif.badge_color,
+                alpha,
+            );
         }
     }
 
@@ -967,15 +1034,343 @@ impl Renderer {
         }
     }
 
+    /// Renders the rich Full Media Control Card matching Nusa style with seek bar, master volume, localized date & time.
+    fn draw_full_media_card(
+        &self,
+        island: &Island,
+        config: &crate::config::AppConfig,
+        track: &crate::island::TrackInfo,
+        left: f32,
+        top: f32,
+        right: f32,
+        _bottom: f32,
+        alpha: f32,
+    ) {
+        unsafe {
+            // 1. Album Artwork Square on Top-Left (46x46 px, corner radius 8px)
+            let art_size = 46.0;
+            let art_cx = left + 16.0 + art_size * 0.5;
+            let art_cy = top + 16.0 + art_size * 0.5;
+            let art_radius = art_size * 0.5;
+
+            if let Some(art) = &self.album_art {
+                self.draw_album_art_badge(art, art_cx, art_cy, art_radius, alpha);
+            } else {
+                let rot = if config.enable_vinyl_animation { island.vinyl_rotation } else { 0.0 };
+                self.draw_spinning_vinyl(art_cx, art_cy, art_radius, rot, alpha);
+            }
+
+            // 2. Top Header Line (Green dot + Localized Date/Time + Mini Visualizer + Collapse Button)
+            let content_left = left + 16.0 + art_size + 12.0;
+
+            // Green glowing status dot
+            let dot_x = content_left + 4.0;
+            let dot_y = top + 20.0;
+            let dot_radius = 3.2;
+            let dot_ellipse = D2D1_ELLIPSE {
+                point: windows_numerics::Vector2 { X: dot_x, Y: dot_y },
+                radiusX: dot_radius,
+                radiusY: dot_radius,
+            };
+            self.brush_idle_dot.SetOpacity(0.95 * alpha);
+            self.d2d_context.FillEllipse(&dot_ellipse, &self.brush_idle_dot);
+
+            // Date & Time string formatted like Nusa: e.g. "Sab 14 Nov 2026 17.25"
+            let st = windows::Win32::System::SystemInformation::GetLocalTime();
+            let day_names = ["Min", "Sen", "Sel", "Rab", "Kam", "Jum", "Sab"];
+            let day_idx = (st.wDayOfWeek as usize).min(6);
+            let month_names = ["Jan", "Feb", "Mar", "Apr", "Mei", "Jun", "Jul", "Agu", "Sep", "Okt", "Nov", "Des"];
+            let month_idx = (st.wMonth.saturating_sub(1) as usize).min(11);
+            let date_time_str = format!("{} {:02} {} {:04} {:02}.{:02}", day_names[day_idx], st.wDay, month_names[month_idx], st.wYear, st.wHour, st.wMinute);
+            let dt_utf16: Vec<u16> = date_time_str.encode_utf16().collect();
+
+            self.brush_subtext.SetOpacity(0.88 * alpha);
+            let dt_rect = D2D_RECT_F {
+                left: dot_x + 8.0,
+                top: top + 12.0,
+                right: right - 56.0,
+                bottom: top + 28.0,
+            };
+            self.d2d_context.DrawText(
+                &dt_utf16,
+                &self.format_date,
+                &dt_rect as *const _,
+                &self.brush_subtext,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+
+            // Mini audio visualizer on top right
+            if config.enable_media_island {
+                self.draw_audio_visualizer(
+                    right - 44.0,
+                    top + 20.0,
+                    island.audio_peak,
+                    island.audio_phase,
+                    7,
+                    12.0,
+                    alpha * 0.90,
+                );
+            }
+
+            // Top-right collapse chevron button: "^"
+            let chevron_x = right - 22.0;
+            let chevron_y = top + 20.0;
+            self.brush_white.SetOpacity(0.75 * alpha);
+            self.d2d_context.DrawLine(
+                pt(chevron_x - 4.5, chevron_y + 2.0),
+                pt(chevron_x, chevron_y - 2.5),
+                &self.brush_white,
+                1.6,
+                None,
+            );
+            self.d2d_context.DrawLine(
+                pt(chevron_x, chevron_y - 2.5),
+                pt(chevron_x + 4.5, chevron_y + 2.0),
+                &self.brush_white,
+                1.6,
+                None,
+            );
+
+            // 3. Track Title & Artist
+            self.brush_white.SetOpacity(alpha);
+            let title_rect = D2D_RECT_F {
+                left: content_left,
+                top: top + 31.0,
+                right: right - 18.0,
+                bottom: top + 48.0,
+            };
+            let title_utf16: Vec<u16> = track.title.encode_utf16().collect();
+            self.d2d_context.DrawText(
+                &title_utf16,
+                &self.format_title,
+                &title_rect as *const _,
+                &self.brush_white,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+
+            let artist_rect = D2D_RECT_F {
+                left: content_left,
+                top: top + 48.0,
+                right: right - 18.0,
+                bottom: top + 64.0,
+            };
+            let artist_str = if track.artist.is_empty() { "Now Playing".to_string() } else { track.artist.clone() };
+            let artist_utf16: Vec<u16> = artist_str.encode_utf16().collect();
+            self.brush_subtext.SetOpacity(0.80 * alpha);
+            self.d2d_context.DrawText(
+                &artist_utf16,
+                &self.format_body,
+                &artist_rect as *const _,
+                &self.brush_subtext,
+                D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+
+            // 4. Playback Seek Bar & Time Labels
+            let seek_y = top + 76.0;
+
+            // Left Elapsed Time
+            let pos_secs = track.position_secs.max(0.0);
+            let pos_mins = (pos_secs / 60.0).floor() as u32;
+            let pos_rem = (pos_secs % 60.0).floor() as u32;
+            let pos_str = format!("{:02}:{:02}", pos_mins, pos_rem);
+            let pos_utf16: Vec<u16> = pos_str.encode_utf16().collect();
+
+            let pos_rect = D2D_RECT_F {
+                left: left + 14.0,
+                top: seek_y - 8.0,
+                right: left + 54.0,
+                bottom: seek_y + 8.0,
+            };
+            self.brush_time.SetOpacity(0.85 * alpha);
+            self.d2d_context.DrawText(
+                &pos_utf16,
+                &self.format_time,
+                &pos_rect as *const _,
+                &self.brush_time,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+
+            // Center Track Line
+            let seek_left = left + 58.0;
+            let seek_right = right - 58.0;
+            let seek_w = (seek_right - seek_left).max(10.0);
+
+            let ratio = if track.duration_secs > 0.0 {
+                (pos_secs / track.duration_secs).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+
+            // Background gray track
+            self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 * alpha });
+            self.d2d_context.DrawLine(
+                pt(seek_left, seek_y),
+                pt(seek_right, seek_y),
+                &self.brush_btn_bg,
+                3.6,
+                None,
+            );
+
+            // Active played progress
+            let played_x = seek_left + ratio * seek_w;
+            self.brush_white.SetOpacity(0.95 * alpha);
+            if ratio > 0.005 {
+                self.d2d_context.DrawLine(
+                    pt(seek_left, seek_y),
+                    pt(played_x, seek_y),
+                    &self.brush_white,
+                    3.6,
+                    None,
+                );
+            }
+
+            // Draggable Knob / Thumb
+            let thumb = D2D1_ELLIPSE {
+                point: windows_numerics::Vector2 { X: played_x, Y: seek_y },
+                radiusX: 4.5,
+                radiusY: 4.5,
+            };
+            self.d2d_context.FillEllipse(&thumb, &self.brush_white);
+
+            // Right Remaining Time
+            let rem_str = if track.duration_secs > 0.0 {
+                let rem_secs = (track.duration_secs - pos_secs).max(0.0);
+                let rem_mins = (rem_secs / 60.0).floor() as u32;
+                let rem_s = (rem_secs % 60.0).floor() as u32;
+                format!("-{:02}:{:02}", rem_mins, rem_s)
+            } else {
+                "--:--".to_string()
+            };
+            let rem_utf16: Vec<u16> = rem_str.encode_utf16().collect();
+            let rem_rect = D2D_RECT_F {
+                left: right - 54.0,
+                top: seek_y - 8.0,
+                right: right - 14.0,
+                bottom: seek_y + 8.0,
+            };
+            self.d2d_context.DrawText(
+                &rem_utf16,
+                &self.format_date,
+                &rem_rect as *const _,
+                &self.brush_time,
+                D2D1_DRAW_TEXT_OPTIONS_NONE,
+                DWRITE_MEASURING_MODE_NATURAL,
+            );
+
+            // 5. Bottom Controls (Left info bubble, Center media transport, Right volume)
+            let ctrl_y = top + 106.0;
+
+            // Info / lyrics bubble icon on left [💬]
+            let bubble_cx = left + 28.0;
+            let bubble_rect = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F {
+                    left: bubble_cx - 9.0,
+                    top: ctrl_y - 7.0,
+                    right: bubble_cx + 9.0,
+                    bottom: ctrl_y + 6.0,
+                },
+                radiusX: 3.5,
+                radiusY: 3.5,
+            };
+            self.brush_white.SetOpacity(0.65 * alpha);
+            self.d2d_context.DrawRoundedRectangle(&bubble_rect, &self.brush_white, 1.3, None);
+            self.d2d_context.DrawLine(pt(bubble_cx - 4.0, ctrl_y + 6.0), pt(bubble_cx - 7.0, ctrl_y + 9.0), &self.brush_white, 1.3, None);
+            self.d2d_context.DrawLine(pt(bubble_cx - 7.0, ctrl_y + 9.0), pt(bubble_cx - 2.0, ctrl_y + 6.0), &self.brush_white, 1.3, None);
+            let bdot1 = D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: bubble_cx - 3.5, Y: ctrl_y - 0.5 }, radiusX: 1.0, radiusY: 1.0 };
+            let bdot2 = D2D1_ELLIPSE { point: windows_numerics::Vector2 { X: bubble_cx + 3.5, Y: ctrl_y - 0.5 }, radiusX: 1.0, radiusY: 1.0 };
+            self.d2d_context.FillEllipse(&bdot1, &self.brush_white);
+            self.d2d_context.FillEllipse(&bdot2, &self.brush_white);
+
+            // Center Media Transport: Previous, Play/Pause, Next
+            let cx = (left + right) * 0.5;
+
+            // Previous: cx - 38.0
+            let prev_cx = cx - 38.0;
+            self.brush_white.SetOpacity(0.85 * alpha);
+            self.d2d_context.DrawLine(pt(prev_cx + 4.0, ctrl_y - 5.5), pt(prev_cx - 3.5, ctrl_y), &self.brush_white, 1.7, None);
+            self.d2d_context.DrawLine(pt(prev_cx + 4.0, ctrl_y + 5.5), pt(prev_cx - 3.5, ctrl_y), &self.brush_white, 1.7, None);
+            self.d2d_context.DrawLine(pt(prev_cx + 4.0, ctrl_y - 5.5), pt(prev_cx + 4.0, ctrl_y + 5.5), &self.brush_white, 1.7, None);
+            self.d2d_context.DrawLine(pt(prev_cx - 5.0, ctrl_y - 5.0), pt(prev_cx - 5.0, ctrl_y + 5.0), &self.brush_white, 1.7, None);
+
+            // Play / Pause in Center: cx
+            let play_bg = D2D1_ELLIPSE {
+                point: windows_numerics::Vector2 { X: cx, Y: ctrl_y },
+                radiusX: 16.0,
+                radiusY: 16.0,
+            };
+            self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.15 * alpha });
+            self.d2d_context.FillEllipse(&play_bg, &self.brush_btn_bg);
+
+            self.brush_white.SetOpacity(0.95 * alpha);
+            if island.is_media_playing {
+                // Pause: two bars
+                self.d2d_context.DrawLine(pt(cx - 3.2, ctrl_y - 5.5), pt(cx - 3.2, ctrl_y + 5.5), &self.brush_white, 2.2, None);
+                self.d2d_context.DrawLine(pt(cx + 3.2, ctrl_y - 5.5), pt(cx + 3.2, ctrl_y + 5.5), &self.brush_white, 2.2, None);
+            } else {
+                // Play: triangle
+                self.d2d_context.DrawLine(pt(cx - 3.5, ctrl_y - 6.0), pt(cx + 5.5, ctrl_y), &self.brush_white, 1.8, None);
+                self.d2d_context.DrawLine(pt(cx - 3.5, ctrl_y + 6.0), pt(cx + 5.5, ctrl_y), &self.brush_white, 1.8, None);
+                self.d2d_context.DrawLine(pt(cx - 3.5, ctrl_y - 6.0), pt(cx - 3.5, ctrl_y + 6.0), &self.brush_white, 1.8, None);
+            }
+
+            // Next: cx + 38.0
+            let next_cx = cx + 38.0;
+            self.brush_white.SetOpacity(0.85 * alpha);
+            self.d2d_context.DrawLine(pt(next_cx - 4.0, ctrl_y - 5.5), pt(next_cx + 3.5, ctrl_y), &self.brush_white, 1.7, None);
+            self.d2d_context.DrawLine(pt(next_cx - 4.0, ctrl_y + 5.5), pt(next_cx + 3.5, ctrl_y), &self.brush_white, 1.7, None);
+            self.d2d_context.DrawLine(pt(next_cx - 4.0, ctrl_y - 5.5), pt(next_cx - 4.0, ctrl_y + 5.5), &self.brush_white, 1.7, None);
+            self.d2d_context.DrawLine(pt(next_cx + 5.0, ctrl_y - 5.0), pt(next_cx + 5.0, ctrl_y + 5.0), &self.brush_white, 1.7, None);
+
+            // Right Volume Control: Speaker icon + Volume slider
+            let spk_x = right - 86.0;
+            self.brush_white.SetOpacity(0.75 * alpha);
+            // Speaker horn
+            self.d2d_context.DrawLine(pt(spk_x - 4.0, ctrl_y - 2.5), pt(spk_x - 1.5, ctrl_y - 2.5), &self.brush_white, 1.3, None);
+            self.d2d_context.DrawLine(pt(spk_x - 1.5, ctrl_y - 2.5), pt(spk_x + 2.0, ctrl_y - 5.5), &self.brush_white, 1.3, None);
+            self.d2d_context.DrawLine(pt(spk_x + 2.0, ctrl_y - 5.5), pt(spk_x + 2.0, ctrl_y + 5.5), &self.brush_white, 1.3, None);
+            self.d2d_context.DrawLine(pt(spk_x + 2.0, ctrl_y + 5.5), pt(spk_x - 1.5, ctrl_y + 2.5), &self.brush_white, 1.3, None);
+            self.d2d_context.DrawLine(pt(spk_x - 1.5, ctrl_y + 2.5), pt(spk_x - 4.0, ctrl_y + 2.5), &self.brush_white, 1.3, None);
+            self.d2d_context.DrawLine(pt(spk_x - 4.0, ctrl_y - 2.5), pt(spk_x - 4.0, ctrl_y + 2.5), &self.brush_white, 1.3, None);
+            // Speaker wave arc
+            self.d2d_context.DrawLine(pt(spk_x + 4.0, ctrl_y - 3.0), pt(spk_x + 5.0, ctrl_y), &self.brush_white, 1.3, None);
+            self.d2d_context.DrawLine(pt(spk_x + 5.0, ctrl_y), pt(spk_x + 4.0, ctrl_y + 3.0), &self.brush_white, 1.3, None);
+
+            // Volume Slider track
+            let vol_left = right - 76.0;
+            let vol_right = right - 18.0;
+            let vol_w = vol_right - vol_left;
+            let vol_val = island.volume.clamp(0.0, 1.0);
+
+            self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 * alpha });
+            self.d2d_context.DrawLine(pt(vol_left, ctrl_y), pt(vol_right, ctrl_y), &self.brush_btn_bg, 3.2, None);
+
+            let vol_fill_x = vol_left + vol_val * vol_w;
+            self.brush_white.SetOpacity(0.90 * alpha);
+            if vol_val > 0.02 {
+                self.d2d_context.DrawLine(pt(vol_left, ctrl_y), pt(vol_fill_x, ctrl_y), &self.brush_white, 3.2, None);
+            }
+            let vol_thumb = D2D1_ELLIPSE {
+                point: windows_numerics::Vector2 { X: vol_fill_x, Y: ctrl_y },
+                radiusX: 3.8,
+                radiusY: 3.8,
+            };
+            self.d2d_context.FillEllipse(&vol_thumb, &self.brush_white);
+        }
+    }
+
     /// Renders vector media controls (Previous, Play/Pause, Next) on the right side of the pill.
     fn draw_media_controls(&self, right: f32, cy: f32, is_playing: bool, alpha: f32) {
         unsafe {
-            // Previous button: cx = right - 92.0
-            let prev_cx = right - 92.0;
+            // Previous button: cx = right - 124.0
+            let prev_cx = right - 124.0;
             let prev_bg = D2D1_ELLIPSE {
                 point: windows_numerics::Vector2 { X: prev_cx, Y: cy },
-                radiusX: 14.0,
-                radiusY: 14.0,
+                radiusX: 13.5,
+                radiusY: 13.5,
             };
             self.brush_btn_bg.SetOpacity(0.50 * alpha);
             self.d2d_context.FillEllipse(&prev_bg, &self.brush_btn_bg);
@@ -1012,12 +1407,12 @@ impl Renderer {
                 None,
             );
 
-            // Play / Pause button: cx = right - 58.0 (prominent, radius 16.5)
-            let play_cx = right - 58.0;
+            // Play / Pause button: cx = right - 88.0 (prominent, radius 16.0)
+            let play_cx = right - 88.0;
             let play_bg = D2D1_ELLIPSE {
                 point: windows_numerics::Vector2 { X: play_cx, Y: cy },
-                radiusX: 16.5,
-                radiusY: 16.5,
+                radiusX: 16.0,
+                radiusY: 16.0,
             };
             self.brush_btn_bg.SetOpacity(0.85 * alpha);
             self.d2d_context.FillEllipse(&play_bg, &self.brush_btn_bg);
@@ -1064,12 +1459,12 @@ impl Renderer {
                 );
             }
 
-            // Next button: cx = right - 24.0
-            let next_cx = right - 24.0;
+            // Next button: cx = right - 52.0
+            let next_cx = right - 52.0;
             let next_bg = D2D1_ELLIPSE {
                 point: windows_numerics::Vector2 { X: next_cx, Y: cy },
-                radiusX: 14.0,
-                radiusY: 14.0,
+                radiusX: 13.5,
+                radiusY: 13.5,
             };
             self.brush_btn_bg.SetOpacity(0.50 * alpha);
             self.d2d_context.FillEllipse(&next_bg, &self.brush_btn_bg);
@@ -1103,6 +1498,32 @@ impl Renderer {
                 pt(next_cx + 5.0, cy + 4.5),
                 &self.brush_white,
                 1.6,
+                None,
+            );
+
+            // 4. Dedicated Expand View Button: cx = right - 20.0
+            let toggle_cx = right - 20.0;
+            let toggle_bg = D2D1_ELLIPSE {
+                point: windows_numerics::Vector2 { X: toggle_cx, Y: cy },
+                radiusX: 12.5,
+                radiusY: 12.5,
+            };
+            self.brush_btn_bg.SetOpacity(0.60 * alpha);
+            self.d2d_context.FillEllipse(&toggle_bg, &self.brush_btn_bg);
+
+            self.brush_white.SetOpacity(0.90 * alpha);
+            self.d2d_context.DrawLine(
+                pt(toggle_cx - 3.8, cy - 2.0),
+                pt(toggle_cx, cy + 2.5),
+                &self.brush_white,
+                1.7,
+                None,
+            );
+            self.d2d_context.DrawLine(
+                pt(toggle_cx, cy + 2.5),
+                pt(toggle_cx + 3.8, cy - 2.0),
+                &self.brush_white,
+                1.7,
                 None,
             );
         }
@@ -1520,31 +1941,7 @@ impl Renderer {
                         let badge_radius = 9.0;
                         let badge_cx = left + 18.0;
 
-                        if let Some(art) = &self.album_art {
-                            if is_media_notif {
-                                self.draw_album_art_badge(art, badge_cx, cy, badge_radius, alpha);
-                            } else {
-                                self.draw_vector_app_icon(
-                                    &notif.app_name,
-                                    badge_cx,
-                                    cy,
-                                    badge_radius,
-                                    &notif.badge_letter,
-                                    notif.badge_color,
-                                    alpha,
-                                );
-                            }
-                        } else {
-                            self.draw_vector_app_icon(
-                                &notif.app_name,
-                                badge_cx,
-                                cy,
-                                badge_radius,
-                                &notif.badge_letter,
-                                notif.badge_color,
-                                alpha,
-                            );
-                        }
+                        self.draw_notification_badge(notif, is_media_notif, badge_cx, cy, badge_radius, alpha);
 
                         // Single-line text in middle
                         let text_rect = D2D_RECT_F {
@@ -1589,31 +1986,7 @@ impl Renderer {
                         let badge_radius = (pill_h * 0.32).clamp(15.0, 19.0);
                         let badge_cx = left + badge_radius + 14.0;
 
-                        if let Some(art) = &self.album_art {
-                            if is_media_notif {
-                                self.draw_album_art_badge(art, badge_cx, cy, badge_radius, alpha);
-                            } else {
-                                self.draw_vector_app_icon(
-                                    &notif.app_name,
-                                    badge_cx,
-                                    cy,
-                                    badge_radius,
-                                    &notif.badge_letter,
-                                    notif.badge_color,
-                                    alpha,
-                                );
-                            }
-                        } else {
-                            self.draw_vector_app_icon(
-                                &notif.app_name,
-                                badge_cx,
-                                cy,
-                                badge_radius,
-                                &notif.badge_letter,
-                                notif.badge_color,
-                                alpha,
-                            );
-                        }
+                        self.draw_notification_badge(notif, is_media_notif, badge_cx, cy, badge_radius, alpha);
 
                         let text_left = badge_cx + badge_radius + 12.0;
                         let text_right = right - 54.0;
@@ -1668,84 +2041,88 @@ impl Renderer {
                         );
                     }
                 } else if let Some(track) = &island.current_track {
-                    // B. Expanded Music Player Mode (Hover or Playback)
-                    self.brush_white.SetOpacity(alpha);
-                    self.brush_subtext.SetOpacity(alpha);
-
-                    let vinyl_radius = (pill_h * 0.34).clamp(16.0, 20.0);
-                    let vinyl_cx = left + vinyl_radius + 14.0;
-
-                    // 1. Draw Spinning Vinyl Record ("Vynl mutar")
-                    let rot = if config.enable_vinyl_animation { island.vinyl_rotation } else { 0.0 };
-                    self.draw_spinning_vinyl(
-                        vinyl_cx,
-                        cy,
-                        vinyl_radius,
-                        rot,
-                        alpha,
-                    );
-
-                    // 2. Track Title & Artist Text
-                    let text_left = vinyl_cx + vinyl_radius + 12.0;
-                    let text_right = right - 114.0; // Space reserved for playback controls
-
-                    let title_rect = D2D_RECT_F {
-                        left: text_left,
-                        top: top + (pill_h * 0.16),
-                        right: text_right - 48.0,
-                        bottom: top + (pill_h * 0.50),
-                    };
-                    let title_utf16: Vec<u16> = track.title.encode_utf16().collect();
-                    self.d2d_context.DrawText(
-                        &title_utf16,
-                        &self.format_title,
-                        &title_rect as *const _,
-                        &self.brush_white,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    );
-
-                    let artist_rect = D2D_RECT_F {
-                        left: text_left,
-                        top: top + (pill_h * 0.50),
-                        right: text_right - 42.0,
-                        bottom: top + (pill_h * 0.88),
-                    };
-                    let artist_text = if track.artist.is_empty() {
-                        "Now Playing".to_string()
+                    if island.mode == IslandMode::FullCard || pill_h >= 90.0 {
+                        self.draw_full_media_card(island, config, track, left, top, right, bottom, alpha);
                     } else {
-                        track.artist.clone()
-                    };
-                    let artist_utf16: Vec<u16> = artist_text.encode_utf16().collect();
-                    self.d2d_context.DrawText(
-                        &artist_utf16,
-                        &self.format_body,
-                        &artist_rect as *const _,
-                        &self.brush_subtext,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    );
+                        // B. Expanded Music Player Mode (Hover or Playback)
+                        self.brush_white.SetOpacity(alpha);
+                        self.brush_subtext.SetOpacity(alpha);
 
-                    // Real-time audio visualizer waves in expanded mode
-                    if config.enable_media_island {
-                        self.draw_audio_visualizer(
-                            text_right - 26.0,
-                            top + (pill_h * 0.68),
-                            island.audio_peak,
-                            island.audio_phase,
-                            11,
-                            18.0,
-                            alpha * 0.95,
+                        let vinyl_radius = (pill_h * 0.34).clamp(16.0, 20.0);
+                        let vinyl_cx = left + vinyl_radius + 14.0;
+
+                        // 1. Draw Spinning Vinyl Record ("Vynl mutar")
+                        let rot = if config.enable_vinyl_animation { island.vinyl_rotation } else { 0.0 };
+                        self.draw_spinning_vinyl(
+                            vinyl_cx,
+                            cy,
+                            vinyl_radius,
+                            rot,
+                            alpha,
+                        );
+
+                        // 2. Track Title & Artist Text
+                        let text_left = vinyl_cx + vinyl_radius + 12.0;
+                        let text_right = right - 144.0; // Space reserved for media controls + expand button
+
+                        let title_rect = D2D_RECT_F {
+                            left: text_left,
+                            top: top + (pill_h * 0.16),
+                            right: text_right - 48.0,
+                            bottom: top + (pill_h * 0.50),
+                        };
+                        let title_utf16: Vec<u16> = track.title.encode_utf16().collect();
+                        self.d2d_context.DrawText(
+                            &title_utf16,
+                            &self.format_title,
+                            &title_rect as *const _,
+                            &self.brush_white,
+                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+
+                        let artist_rect = D2D_RECT_F {
+                            left: text_left,
+                            top: top + (pill_h * 0.50),
+                            right: text_right - 42.0,
+                            bottom: top + (pill_h * 0.88),
+                        };
+                        let artist_text = if track.artist.is_empty() {
+                            "Now Playing".to_string()
+                        } else {
+                            track.artist.clone()
+                        };
+                        let artist_utf16: Vec<u16> = artist_text.encode_utf16().collect();
+                        self.d2d_context.DrawText(
+                            &artist_utf16,
+                            &self.format_body,
+                            &artist_rect as *const _,
+                            &self.brush_subtext,
+                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+
+                        // Real-time audio visualizer waves in expanded mode
+                        if config.enable_media_island {
+                            self.draw_audio_visualizer(
+                                text_right - 26.0,
+                                top + (pill_h * 0.68),
+                                island.audio_peak,
+                                island.audio_phase,
+                                11,
+                                18.0,
+                                alpha * 0.95,
+                            );
+                        }
+
+                        // 3. Draw Vector Media Controls (⏮ ⏯ ⏭)
+                        self.draw_media_controls(
+                            right,
+                            cy,
+                            island.is_media_playing,
+                            alpha,
                         );
                     }
-
-                    // 3. Draw Vector Media Controls (⏮ ⏯ ⏭)
-                    self.draw_media_controls(
-                        right,
-                        cy,
-                        island.is_media_playing,
-                        alpha,
-                    );
                 }
             }
 

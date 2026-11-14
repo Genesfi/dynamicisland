@@ -15,9 +15,15 @@ pub enum MediaEvent {
     TrackChanged {
         notif: Notification,
         thumbnail_bytes: Option<Vec<u8>>,
+        position_secs: f32,
+        duration_secs: f32,
     },
     ThumbnailLoaded(Vec<u8>),
     PlaybackState(bool), // true = playing, false = paused/stopped
+    TimelineUpdate {
+        position_secs: f32,
+        duration_secs: f32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -25,6 +31,44 @@ pub enum MediaCommand {
     TogglePlayPause,
     Previous,
     Next,
+}
+
+static LAST_SEEK_TIME: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+
+/// Seeks media playback to the specified position in seconds.
+/// Automatically routes to YTMPX (Tauri YouTube Music) and/or Windows GSMTC (Spotify Desktop, Chrome, Edge).
+pub fn seek_playback(seconds: f32) {
+    if let Ok(mut last) = LAST_SEEK_TIME.lock() {
+        let now = std::time::Instant::now();
+        if let Some(prev) = *last {
+            if now.duration_since(prev) < std::time::Duration::from_millis(150) {
+                return;
+            }
+        }
+        *last = Some(now);
+    }
+
+    if is_ytmpx_connected() {
+        send_ytmpx_command(&format!(r#"{{"command":"seek","value":{:.2}}}"#, seconds));
+        send_ytmpx_command(&format!(r#"{{"command":"seekTo","value":{:.2}}}"#, seconds));
+    }
+
+    thread::spawn(move || {
+        let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
+            Ok(op) => match wait_async(op) {
+                Ok(m) => m,
+                Err(_) => return,
+            },
+            Err(_) => return,
+        };
+
+        if let Some(session) = get_best_media_session(&manager) {
+            let pos_100ns = (seconds as f64 * 10_000_000.0).round() as i64;
+            if let Ok(seek_op) = session.TryChangePlaybackPositionAsync(pos_100ns) {
+                let _ = wait_async(seek_op);
+            }
+        }
+    });
 }
 
 fn wait_async<T: RuntimeType + 'static>(
@@ -53,10 +97,6 @@ fn get_best_media_session(
                 .map(|status| status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing)
                 .unwrap_or(false);
 
-            if !is_playing {
-                continue;
-            }
-
             let mut score: i32 = 20;
 
             let source = s
@@ -67,10 +107,17 @@ fn get_best_media_session(
             // Highest priority to Tauri YTM, Spotify, Apple Music
             if source.contains("tauri") || source.contains("ytm") {
                 score += 250;
-            } else if source.contains("spotify") || source.contains("applemusic") || source.contains("deezer") {
+            } else if source.contains("spotify") {
+                score += 200;
+            } else if source.contains("applemusic") || source.contains("deezer") {
                 score += 150;
             } else if source.contains("youtube") && source.contains("music") {
                 score += 120;
+            }
+
+            // Actively playing session ALWAYS takes strict priority over any paused session!
+            if is_playing {
+                score += 500;
             }
 
             if let Ok(prop_op) = s.TryGetMediaPropertiesAsync() {
@@ -152,6 +199,10 @@ struct RawYtmpxMeta {
     cover: Option<String>,
     art: Option<String>,
     status: Option<String>,
+    #[serde(rename = "totalDuration")]
+    total_duration_ms: Option<f64>,
+    duration: Option<f64>,
+    elapsed: Option<f64>,
 }
 
 static YTMPX_CMD_TX: std::sync::Mutex<Option<std::sync::mpsc::Sender<String>>> = std::sync::Mutex::new(None);
@@ -279,6 +330,8 @@ fn handle_ytmpx_json(text: &str, sender: &Sender<MediaEvent>) -> Option<String> 
                 time_str: "♪".to_string(),
                 badge_letter: "▶".to_string(),
                 badge_color: (0.95, 0.10, 0.10),
+                icon_bytes: None,
+                aumid: None,
             };
 
             let cached_thumb = if !art_url.is_empty() {
@@ -287,9 +340,17 @@ fn handle_ytmpx_json(text: &str, sender: &Sender<MediaEvent>) -> Option<String> 
                 None
             };
 
+            let duration_secs = meta.total_duration_ms
+                .map(|ms| ms as f32 / 1000.0)
+                .or_else(|| meta.duration.map(|d| d as f32))
+                .unwrap_or(0.0);
+            let position_secs = meta.elapsed.map(|e| e as f32).unwrap_or(0.0);
+
             let _ = sender.send(MediaEvent::TrackChanged {
                 notif,
                 thumbnail_bytes: cached_thumb,
+                position_secs,
+                duration_secs,
             });
             let _ = sender.send(MediaEvent::PlaybackState(is_playing));
 
@@ -308,123 +369,59 @@ fn start_ytmpx_bridge(sender: Sender<MediaEvent>) {
     }
 
     thread::spawn(move || {
-        let mut clients: Vec<tungstenite::WebSocket<std::net::TcpStream>> = Vec::new();
         let mut last_art_url = String::new();
 
         loop {
-            // 1. Try to bind as WebSocket server on 127.0.0.1:8765
-            if let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:8765") {
-                let _ = listener.set_nonblocking(true);
-
-                loop {
-                    // Accept new incoming WebSocket client connections
-                    if let Ok((stream, _)) = listener.accept() {
-                        let _ = stream.set_nonblocking(false);
-                        let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                        let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-                        if let Ok(ws) = tungstenite::accept(stream) {
-                            let _ = ws.get_ref().set_read_timeout(Some(Duration::from_millis(15)));
-                            clients.push(ws);
-                            YTMPX_CONNECTED.store(true, std::sync::atomic::Ordering::Relaxed);
+            // DynamicNotification connects purely as a WebSocket client to Tauri YouTube Music on 127.0.0.1:8765.
+            // By remaining a client, port 8765 is never blocked or stolen from Tauri YTM,
+            // allowing Tauri YTM (server), FocusGrow (client), and DynamicNotification (client) to coexist seamlessly.
+            if let Ok(stream) = std::net::TcpStream::connect("127.0.0.1:8765") {
+                let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+                let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
+                if let Ok((mut ws, _)) = tungstenite::client("ws://127.0.0.1:8765", stream) {
+                    let _ = ws.get_ref().set_read_timeout(Some(Duration::from_millis(15)));
+                    YTMPX_CONNECTED.store(true, std::sync::atomic::Ordering::Relaxed);
+                    loop {
+                        while let Ok(cmd) = cmd_rx.try_recv() {
+                            let payload = if cmd.starts_with('{') {
+                                cmd
+                            } else {
+                                format!(r#"{{"command":"{}"}}"#, cmd)
+                            };
+                            if ws.send(tungstenite::Message::text(&payload)).is_err() {
+                                break;
+                            }
                         }
-                    }
-
-                    if clients.is_empty() {
-                        YTMPX_CONNECTED.store(false, std::sync::atomic::Ordering::Relaxed);
-                    }
-
-                    // Forward pending commands to all connected clients
-                    while let Ok(cmd) = cmd_rx.try_recv() {
-                        let payload = format!(r#"{{"command":"{}"}}"#, cmd);
-                        clients.retain_mut(|c| c.send(tungstenite::Message::text(&payload)).is_ok());
-                    }
-
-                    // Read incoming messages
-                    let s = sender.clone();
-                    let mut url_to_fetch: Option<String> = None;
-                    clients.retain_mut(|c| {
-                        loop {
-                            match c.read() {
-                                Ok(msg) => {
-                                    if let Ok(text) = msg.to_text() {
-                                        if let Some(art) = handle_ytmpx_json(text, &s) {
-                                            url_to_fetch = Some(art);
+                        match ws.read() {
+                            Ok(msg) => {
+                                if let Ok(text) = msg.to_text() {
+                                    if let Some(art) = handle_ytmpx_json(text, &sender) {
+                                        if art != last_art_url {
+                                            last_art_url = art.clone();
+                                            let s_art = sender.clone();
+                                            thread::spawn(move || {
+                                                if let Some(bytes) = fetch_cover_bytes(&art) {
+                                                    let _ = s_art.send(MediaEvent::ThumbnailLoaded(bytes));
+                                                }
+                                            });
+                                        } else if let Some(cached) = get_cached_cover(&art) {
+                                            let _ = sender.send(MediaEvent::ThumbnailLoaded(cached));
                                         }
                                     }
                                 }
-                                Err(tungstenite::Error::Io(ref e))
-                                    if e.kind() == std::io::ErrorKind::WouldBlock
-                                        || e.kind() == std::io::ErrorKind::TimedOut =>
-                                {
-                                    return true;
-                                }
-                                Err(_) => return false,
                             }
+                            Err(tungstenite::Error::Io(ref e))
+                                if e.kind() == std::io::ErrorKind::WouldBlock
+                                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+                            Err(_) => break,
                         }
-                    });
-
-                    if let Some(art) = url_to_fetch {
-                        if art != last_art_url {
-                            last_art_url = art.clone();
-                            let s_art = sender.clone();
-                            thread::spawn(move || {
-                                if let Some(bytes) = fetch_cover_bytes(&art) {
-                                    let _ = s_art.send(MediaEvent::ThumbnailLoaded(bytes));
-                                }
-                            });
-                        } else if let Some(cached) = get_cached_cover(&art) {
-                            let _ = sender.send(MediaEvent::ThumbnailLoaded(cached));
-                        }
+                        thread::sleep(Duration::from_millis(40));
                     }
-
-                    thread::sleep(Duration::from_millis(40));
-                }
-            } else {
-                // Port 8765 already bound: connect as client
-                if let Ok(stream) = std::net::TcpStream::connect("127.0.0.1:8765") {
-                    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
-                    let _ = stream.set_write_timeout(Some(Duration::from_millis(500)));
-                    if let Ok((mut ws, _)) = tungstenite::client("ws://127.0.0.1:8765", stream) {
-                        let _ = ws.get_ref().set_read_timeout(Some(Duration::from_millis(15)));
-                        YTMPX_CONNECTED.store(true, std::sync::atomic::Ordering::Relaxed);
-                        loop {
-                            while let Ok(cmd) = cmd_rx.try_recv() {
-                                let payload = format!(r#"{{"command":"{}"}}"#, cmd);
-                                if ws.send(tungstenite::Message::text(&payload)).is_err() {
-                                    break;
-                                }
-                            }
-                            match ws.read() {
-                                Ok(msg) => {
-                                    if let Ok(text) = msg.to_text() {
-                                        if let Some(art) = handle_ytmpx_json(text, &sender) {
-                                            if art != last_art_url {
-                                                last_art_url = art.clone();
-                                                let s_art = sender.clone();
-                                                thread::spawn(move || {
-                                                    if let Some(bytes) = fetch_cover_bytes(&art) {
-                                                        let _ = s_art.send(MediaEvent::ThumbnailLoaded(bytes));
-                                                    }
-                                                });
-                                            } else if let Some(cached) = get_cached_cover(&art) {
-                                                let _ = sender.send(MediaEvent::ThumbnailLoaded(cached));
-                                            }
-                                        }
-                                    }
-                                }
-                                Err(tungstenite::Error::Io(ref e))
-                                    if e.kind() == std::io::ErrorKind::WouldBlock
-                                        || e.kind() == std::io::ErrorKind::TimedOut => {}
-                                Err(_) => break,
-                            }
-                            thread::sleep(Duration::from_millis(40));
-                        }
-                        YTMPX_CONNECTED.store(false, std::sync::atomic::Ordering::Relaxed);
-                    }
+                    YTMPX_CONNECTED.store(false, std::sync::atomic::Ordering::Relaxed);
                 }
             }
 
-            thread::sleep(Duration::from_millis(1500));
+            thread::sleep(Duration::from_millis(1000));
         }
     });
 }
@@ -483,6 +480,64 @@ pub fn send_media_command(cmd: MediaCommand) {
     });
 }
 
+struct SpotifyWindowContext {
+    found: bool,
+    is_playing: bool,
+    artist: String,
+    title: String,
+}
+
+unsafe extern "system" fn enum_spotify_window(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    if !IsWindow(Some(hwnd)).as_bool() || !IsWindowVisible(hwnd).as_bool() {
+        return BOOL(1);
+    }
+    let mut pid = 0u32;
+    GetWindowThreadProcessId(hwnd, Some(&mut pid));
+    if pid == 0 {
+        return BOOL(1);
+    }
+    let exe = get_process_name(pid).to_lowercase();
+    if exe == "spotify.exe" {
+        let mut title_buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, &mut title_buf) as usize;
+        if len > 0 {
+            let title = String::from_utf16_lossy(&title_buf[..len]);
+            let lower = title.to_lowercase();
+            let out = &mut *(lparam.0 as *mut SpotifyWindowContext);
+            out.found = true;
+            if lower != "spotify" && lower != "spotify free" && lower != "spotify premium" && title.contains(" - ") {
+                let parts: Vec<&str> = title.splitn(2, " - ").collect();
+                out.is_playing = true;
+                out.artist = parts[0].trim().to_string();
+                out.title = parts[1].trim().to_string();
+                return BOOL(0);
+            }
+        }
+    }
+    BOOL(1)
+}
+
+/// Directly queries Spotify Desktop's Win32 window title to get immediate zero-latency play/pause state.
+fn check_spotify_desktop_window() -> Option<(bool, String, String)> {
+    let mut ctx = SpotifyWindowContext {
+        found: false,
+        is_playing: false,
+        artist: String::new(),
+        title: String::new(),
+    };
+    unsafe {
+        let _ = EnumWindows(
+            Some(enum_spotify_window),
+            LPARAM(&mut ctx as *mut _ as isize),
+        );
+    }
+    if ctx.found {
+        Some((ctx.is_playing, ctx.artist, ctx.title))
+    } else {
+        None
+    }
+}
+
 /// Listens for currently playing media in Windows (Spotify, YouTube Music, etc.)
 pub fn start_media_listener(sender: Sender<MediaEvent>) {
     // Start YTMPX bridge in parallel
@@ -493,9 +548,13 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
         let mut last_artist = String::new();
         let mut last_is_playing = false;
         let mut current_has_thumbnail = false;
+        let mut timeline_tick = 0u32;
 
         loop {
-            thread::sleep(Duration::from_millis(600));
+            thread::sleep(Duration::from_millis(250));
+
+            // Fast Spotify Desktop inspection for zero-latency sync
+            let spotify_win = check_spotify_desktop_window();
 
             let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
                 Ok(op) => match wait_async(op) {
@@ -516,7 +575,14 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
                 }
             };
 
-            let is_playing = match session.GetPlaybackInfo() {
+            let source_id = session
+                .SourceAppUserModelId()
+                .map(|h| h.to_string())
+                .unwrap_or_default();
+            let raw_source = source_id.to_lowercase();
+            let is_spotify_session = raw_source.contains("spotify");
+
+            let mut is_playing = match session.GetPlaybackInfo() {
                 Ok(info) => match info.PlaybackStatus() {
                     Ok(status) => {
                         status == GlobalSystemMediaTransportControlsSessionPlaybackStatus::Playing
@@ -526,31 +592,83 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
                 Err(_) => false,
             };
 
-            if is_playing != last_is_playing {
+            // For Spotify Desktop only: cross-reference with Spotify Win32 window title for instant sync!
+            if is_spotify_session {
+                if let Some(ref win) = spotify_win {
+                    if win.0 {
+                        is_playing = true;
+                    } else if !win.0 && win.1.is_empty() {
+                        is_playing = false;
+                    }
+                }
+            }
+
+            let state_changed = is_playing != last_is_playing;
+            if state_changed {
                 last_is_playing = is_playing;
                 let _ = sender.send(MediaEvent::PlaybackState(is_playing));
             }
 
             if is_playing {
+                let mut pos_secs = 0.0f32;
+                let mut dur_secs = 0.0f32;
+                if let Ok(tl) = session.GetTimelineProperties() {
+                    let base_pos = tl.Position().map(|p| p.Duration as f64 / 10_000_000.0).unwrap_or(0.0);
+                    dur_secs = tl.EndTime().map(|e| e.Duration as f32 / 10_000_000.0).unwrap_or(0.0);
+                    let last_update = tl.LastUpdatedTime().map(|t| t.UniversalTime as u64).unwrap_or(0);
+                    if last_update > 0 {
+                        unsafe {
+                            let ft = windows::Win32::System::SystemInformation::GetSystemTimePreciseAsFileTime();
+                            let now_ft = ((ft.dwHighDateTime as u64) << 32) | (ft.dwLowDateTime as u64);
+                            let elapsed = (now_ft.saturating_sub(last_update)) as f64 / 10_000_000.0;
+                            if elapsed >= 0.0 && elapsed < 43200.0 {
+                                pos_secs = (base_pos + elapsed) as f32;
+                            } else {
+                                pos_secs = base_pos as f32;
+                            }
+                        }
+                    } else {
+                        pos_secs = base_pos as f32;
+                    }
+                    if dur_secs > 0.0 && pos_secs > dur_secs {
+                        pos_secs = dur_secs;
+                    }
+                }
+
+                timeline_tick += 1;
+                if timeline_tick % 4 == 0 && dur_secs > 0.0 {
+                    let _ = sender.send(MediaEvent::TimelineUpdate {
+                        position_secs: pos_secs,
+                        duration_secs: dur_secs,
+                    });
+                }
+
                 if let Ok(prop_op) = session.TryGetMediaPropertiesAsync() {
                     if let Ok(props) = wait_async(prop_op) {
-                        let title = props.Title().map(|h| h.to_string()).unwrap_or_default();
-                        let artist = props.Artist().map(|h| h.to_string()).unwrap_or_default();
+                        let mut title = props.Title().map(|h| h.to_string()).unwrap_or_default();
+                        let mut artist = props.Artist().map(|h| h.to_string()).unwrap_or_default();
                         let album = props.AlbumTitle().map(|h| h.to_string()).unwrap_or_default();
 
+                        // Fallback to Spotify window title if GSMTC string is temporarily blank
+                        if title.is_empty() && is_spotify_session {
+                            if let Some(ref win) = spotify_win {
+                                if !win.2.is_empty() {
+                                    title = win.2.clone();
+                                    artist = win.1.clone();
+                                }
+                            }
+                        }
+
                         if !title.is_empty() {
-                            if title != last_title || artist != last_artist {
+                            let track_changed = title != last_title || artist != last_artist;
+                            let play_resumed = is_playing && state_changed;
+
+                            if track_changed || play_resumed {
                                 last_title = title.clone();
                                 last_artist = artist.clone();
 
                                 let thumbnail_bytes = fetch_thumbnail_bytes(&props);
                                 current_has_thumbnail = thumbnail_bytes.is_some();
-
-                                let source_id = session
-                                    .SourceAppUserModelId()
-                                    .map(|h| h.to_string())
-                                    .unwrap_or_default();
-                                let raw_source = source_id.to_lowercase();
 
                                 let (app_name, badge_color) = detect_media_service(&raw_source, &title, &artist, &album);
 
@@ -569,11 +687,15 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
                                     time_str: "♪".to_string(),
                                     badge_letter: "▶".to_string(),
                                     badge_color,
+                                    icon_bytes: None,
+                                    aumid: None,
                                 };
 
                                 let _ = sender.send(MediaEvent::TrackChanged {
                                     notif,
                                     thumbnail_bytes,
+                                    position_secs: pos_secs,
+                                    duration_secs: dur_secs,
                                 });
                             } else if !current_has_thumbnail {
                                 // Thumbnail stream might have arrived slightly after track metadata!
@@ -585,6 +707,8 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
                         }
                     }
                 }
+            } else {
+                timeline_tick = 0;
             }
         }
     });

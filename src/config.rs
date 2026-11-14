@@ -131,6 +131,7 @@ pub struct AppConfig {
     pub smart_contour: bool,
     pub contour_nudge_y: f32,
     pub start_with_windows: bool,
+    pub use_full_media_card: bool,
 }
 
 impl Default for AppConfig {
@@ -152,6 +153,7 @@ impl Default for AppConfig {
             smart_contour: true,
             contour_nudge_y: 34.0,
             start_with_windows: is_autostart_enabled(),
+            use_full_media_card: false,
         }
     }
 }
@@ -236,6 +238,9 @@ impl AppConfig {
                         "start_with_windows" => {
                             cfg.start_with_windows = parts[1] == "true" || parts[1] == "1";
                         }
+                        "use_full_media_card" => {
+                            cfg.use_full_media_card = parts[1] == "true" || parts[1] == "1";
+                        }
                         _ => {}
                     }
                 }
@@ -267,7 +272,7 @@ impl AppConfig {
         };
 
         let content = format!(
-            "# Dynamic Island Settings\ntop_margin={}\nauto_collapse_secs={}\nisland_style={}\nisland_opacity={:.2}\nglow_intensity={:.2}\nvinyl_speed={:.2}\ncompact_mode_view={}\ncompact_music_width={:.1}\ndynamic_album_color={}\nenable_media_island={}\nenable_vinyl_animation={}\nhover_expand_media={}\nidle_click_through={}\nsmart_contour={}\ncontour_nudge_y={:.1}\nstart_with_windows={}\n",
+            "# Dynamic Island Settings\ntop_margin={}\nauto_collapse_secs={}\nisland_style={}\nisland_opacity={:.2}\nglow_intensity={:.2}\nvinyl_speed={:.2}\ncompact_mode_view={}\ncompact_music_width={:.1}\ndynamic_album_color={}\nenable_media_island={}\nenable_vinyl_animation={}\nhover_expand_media={}\nidle_click_through={}\nsmart_contour={}\ncontour_nudge_y={:.1}\nstart_with_windows={}\nuse_full_media_card={}\n",
             self.top_margin,
             self.auto_collapse_secs,
             style_str,
@@ -283,7 +288,8 @@ impl AppConfig {
             self.idle_click_through,
             self.smart_contour,
             self.contour_nudge_y,
-            self.start_with_windows
+            self.start_with_windows,
+            self.use_full_media_card
         );
         let _ = fs::write("config.txt", content);
     }

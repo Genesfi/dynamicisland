@@ -54,12 +54,13 @@ const SLIDER_CARD_OPACITY: (f32, f32, f32, f32) = (20.0, 400.0, 500.0, 448.0);
 const SLIDER_CARD_GLOW: (f32, f32, f32, f32) = (20.0, 454.0, 500.0, 502.0);
 
 // --- Tab 1: Music & Audio Coordinates ---
-const TOGGLE_CARD_DYNAMIC_COLOR: (f32, f32, f32, f32) = (20.0, 134.0, 500.0, 178.0);
-const TOGGLE_CARD_AUDIO_VIZ: (f32, f32, f32, f32) = (20.0, 184.0, 500.0, 228.0);
-const TOGGLE_CARD_VINYL_ANIM: (f32, f32, f32, f32) = (20.0, 234.0, 500.0, 278.0);
-const TOGGLE_CARD_HOVER_EXPAND: (f32, f32, f32, f32) = (20.0, 284.0, 500.0, 328.0);
-const SLIDER_CARD_VINYL_SPEED: (f32, f32, f32, f32) = (20.0, 358.0, 500.0, 406.0);
-const SLIDER_CARD_COMPACT_WIDTH: (f32, f32, f32, f32) = (20.0, 436.0, 500.0, 484.0);
+const TOGGLE_CARD_DYNAMIC_COLOR: (f32, f32, f32, f32) = (20.0, 126.0, 500.0, 168.0);
+const TOGGLE_CARD_AUDIO_VIZ: (f32, f32, f32, f32) = (20.0, 172.0, 500.0, 214.0);
+const TOGGLE_CARD_VINYL_ANIM: (f32, f32, f32, f32) = (20.0, 218.0, 500.0, 260.0);
+const TOGGLE_CARD_HOVER_EXPAND: (f32, f32, f32, f32) = (20.0, 264.0, 500.0, 306.0);
+const TOGGLE_CARD_FULL_CARD: (f32, f32, f32, f32) = (20.0, 310.0, 500.0, 352.0);
+const SLIDER_CARD_VINYL_SPEED: (f32, f32, f32, f32) = (20.0, 370.0, 500.0, 418.0);
+const SLIDER_CARD_COMPACT_WIDTH: (f32, f32, f32, f32) = (20.0, 442.0, 500.0, 490.0);
 
 // --- Tab 2: System & Behavior Coordinates ---
 const TOGGLE_CARD_STARTUP: (f32, f32, f32, f32) = (20.0, 134.0, 500.0, 180.0);
@@ -117,6 +118,7 @@ struct SettingsState {
     enable_media: bool,
     enable_vinyl: bool,
     hover_expand: bool,
+    use_full_media_card: bool,
     click_through: bool,
     smart_contour: bool,
     contour_nudge_y: f32,
@@ -145,6 +147,7 @@ impl SettingsState {
             smart_contour: self.smart_contour,
             contour_nudge_y: self.contour_nudge_y,
             start_with_windows: self.start_with_windows,
+            use_full_media_card: self.use_full_media_card,
         };
         cfg.save();
 
@@ -518,6 +521,7 @@ pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
             enable_media: cfg.enable_media_island,
             enable_vinyl: cfg.enable_vinyl_animation,
             hover_expand: cfg.hover_expand_media,
+            use_full_media_card: cfg.use_full_media_card,
             click_through: cfg.idle_click_through,
             smart_contour: cfg.smart_contour,
             contour_nudge_y: cfg.contour_nudge_y,
@@ -765,7 +769,8 @@ unsafe extern "system" fn settings_wndproc(
                             (TOGGLE_CARD_DYNAMIC_COLOR, "Dynamic Album Color Accent", "Tint border, halo glow & waveform adaptively by album art", state.dynamic_color, 0),
                             (TOGGLE_CARD_AUDIO_VIZ, "Real-time Audio Visualizer (WASAPI)", "Reactive symmetric waveform driven by PC speaker sound", state.enable_media, 1),
                             (TOGGLE_CARD_VINYL_ANIM, "Spinning Vinyl Disc Animation", "Rotating vinyl record & album cover artwork during playback", state.enable_vinyl, 2),
-                            (TOGGLE_CARD_HOVER_EXPAND, "Hover to Expand Media", "Smoothly expand compact island into full controls when hovered", state.hover_expand, 3),
+                            (TOGGLE_CARD_HOVER_EXPAND, "Hover to Expand Media", "Smoothly expand compact island into controls when hovered", state.hover_expand, 3),
+                            (TOGGLE_CARD_FULL_CARD, "Full Media Control Card on Hover", "Directly expand into rich card with seek bar & volume slider", state.use_full_media_card, 4),
                         ];
 
                         for (rect_f, title, desc, is_on, t_idx) in toggles {
@@ -784,6 +789,7 @@ unsafe extern "system" fn settings_wndproc(
                                 1 => state.draw_visualizer_icon(icon_cx, icon_cy),
                                 2 => state.draw_vinyl_icon(icon_cx, icon_cy),
                                 3 => state.draw_cursor_icon(icon_cx, icon_cy),
+                                4 => state.draw_desktop_icon(icon_cx, icon_cy),
                                 _ => {}
                             }
 
@@ -817,7 +823,7 @@ unsafe extern "system" fn settings_wndproc(
                         }
 
                         // Section 2: VINYL ROTATION SPEED
-                        let sec2_rect = D2D_RECT_F { left: 22.0, top: 344.0, right: 400.0, bottom: 360.0 };
+                        let sec2_rect = D2D_RECT_F { left: 22.0, top: 356.0, right: 400.0, bottom: 372.0 };
                         let sec2_utf: Vec<u16> = "VINYL ROTATION SPEED".encode_utf16().collect();
                         state.d2d_target.DrawText(&sec2_utf, &state.format_sec_title, &sec2_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
@@ -857,7 +863,7 @@ unsafe extern "system" fn settings_wndproc(
                         state.d2d_target.FillEllipse(&thumb, &state.brush_text_white);
 
                         // Section 3: COMPACT MUSIC PILL WIDTH
-                        let sec3_rect = D2D_RECT_F { left: 22.0, top: 418.0, right: 400.0, bottom: 434.0 };
+                        let sec3_rect = D2D_RECT_F { left: 22.0, top: 428.0, right: 400.0, bottom: 444.0 };
                         let sec3_utf: Vec<u16> = "COMPACT MUSIC PILL WIDTH (IDLE)".encode_utf16().collect();
                         state.d2d_target.DrawText(&sec3_utf, &state.format_sec_title, &sec3_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
@@ -1094,6 +1100,9 @@ unsafe extern "system" fn settings_wndproc(
                             state.auto_save();
                         } else if in_rect(x, y, TOGGLE_CARD_HOVER_EXPAND) {
                             state.hover_expand = !state.hover_expand;
+                            state.auto_save();
+                        } else if in_rect(x, y, TOGGLE_CARD_FULL_CARD) {
+                            state.use_full_media_card = !state.use_full_media_card;
                             state.auto_save();
                         } else if in_rect(x, y, SLIDER_CARD_VINYL_SPEED) {
                             state.dragging_slider = Some(4);

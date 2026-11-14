@@ -12,9 +12,8 @@ use windows::{
             Gdi::*,
             Imaging::*,
         },
-        System::Com::*,
         UI::{
-            Shell::ExtractIconExW,
+            Shell::{SHGetFileInfoW, SHFILEINFOW, SHGFI_ICON, SHGFI_LARGEICON},
             WindowsAndMessaging::{CreateIconIndirect, DestroyIcon, HICON, ICONINFO},
         },
     },
@@ -23,23 +22,69 @@ use windows::{
 pub struct IconManager {
     wic_factory: IWICImagingFactory,
     cache: HashMap<String, ID2D1Bitmap>,
+    shortcut_cache: HashMap<String, PathBuf>,
+    shortcuts_scanned: bool,
 }
 
 impl IconManager {
-    pub fn new() -> Result<Self> {
-        unsafe {
-            let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-            let wic_factory: IWICImagingFactory =
-                CoCreateInstance(&CLSID_WICImagingFactory, None, CLSCTX_INPROC_SERVER)?;
-            Ok(Self {
-                wic_factory,
-                cache: HashMap::new(),
-            })
+    pub fn new(wic_factory: IWICImagingFactory) -> Self {
+        Self {
+            wic_factory,
+            cache: HashMap::new(),
+            shortcut_cache: HashMap::new(),
+            shortcuts_scanned: false,
+        }
+    }
+
+    /// Scans Windows Start Menu programs folders recursively to map installed applications.
+    fn ensure_shortcuts_scanned(&mut self) {
+        if self.shortcuts_scanned {
+            return;
+        }
+        self.shortcuts_scanned = true;
+
+        let mut search_dirs = Vec::new();
+        if let Ok(appdata) = std::env::var("APPDATA") {
+            search_dirs.push(PathBuf::from(format!(
+                r"{}\Microsoft\Windows\Start Menu\Programs",
+                appdata
+            )));
+        }
+        if let Ok(progdata) = std::env::var("PROGRAMDATA") {
+            search_dirs.push(PathBuf::from(format!(
+                r"{}\Microsoft\Windows\Start Menu\Programs",
+                progdata
+            )));
+        }
+
+        for dir in search_dirs {
+            Self::scan_dir_recursive(&dir, &mut self.shortcut_cache, 0);
+        }
+    }
+
+    fn scan_dir_recursive(dir: &Path, map: &mut HashMap<String, PathBuf>, depth: u32) {
+        if depth > 3 {
+            return;
+        }
+        if let Ok(entries) = std::fs::read_dir(dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    Self::scan_dir_recursive(&path, map, depth + 1);
+                } else if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                    if ext.eq_ignore_ascii_case("lnk") {
+                        if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                            let clean = stem.to_lowercase();
+                            map.entry(clean).or_insert_with(|| path.clone());
+                        }
+                    }
+                }
+            }
         }
     }
 
     /// Finds the executable or shortcut path for a given application.
-    fn find_app_path(app_name: &str) -> Option<PathBuf> {
+    fn find_app_path(&mut self, app_name: &str) -> Option<PathBuf> {
         let lower = app_name.to_lowercase();
 
         // 1. Known Standard Paths
@@ -69,34 +114,19 @@ impl IconManager {
         }
 
         // 2. Scan User & System Start Menu shortcuts
-        let mut search_dirs = Vec::new();
-        if let Ok(appdata) = std::env::var("APPDATA") {
-            search_dirs.push(PathBuf::from(format!(
-                r"{}\Microsoft\Windows\Start Menu\Programs",
-                appdata
-            )));
-        }
-        if let Ok(progdata) = std::env::var("PROGRAMDATA") {
-            search_dirs.push(PathBuf::from(format!(
-                r"{}\Microsoft\Windows\Start Menu\Programs",
-                progdata
-            )));
+        self.ensure_shortcuts_scanned();
+
+        if let Some(p) = self.shortcut_cache.get(&lower) {
+            return Some(p.clone());
         }
 
-        for dir in search_dirs {
-            if let Ok(entries) = std::fs::read_dir(&dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if let Some(file_name) = path.file_stem().and_then(|s| s.to_str()) {
-                        if file_name.to_lowercase().contains(&lower) {
-                            return Some(path);
-                        }
-                    }
-                }
+        for (k, v) in &self.shortcut_cache {
+            if k.contains(&lower) || lower.contains(k) {
+                return Some(v.clone());
             }
         }
 
-        // 3. Fallback to Windows Explorer icon
+        // 3. Fallback to Windows Explorer
         let explorer = Path::new(r"C:\Windows\explorer.exe");
         if explorer.exists() {
             Some(explorer.to_path_buf())
@@ -105,40 +135,107 @@ impl IconManager {
         }
     }
 
-    /// Retrieves or loads the Direct2D bitmap icon for the application.
+    /// Extracts large icon directly from file path (.lnk, .exe, or shell item) via Win32 SHGetFileInfoW.
+    pub fn get_icon_from_path(
+        &self,
+        d2d_context: &ID2D1DeviceContext,
+        path: &Path,
+    ) -> Option<ID2D1Bitmap> {
+        let path_str = path.to_str()?;
+        let mut wide_path: Vec<u16> = path_str.encode_utf16().collect();
+        wide_path.push(0);
+
+        let mut shfi = SHFILEINFOW::default();
+        let cb_size = std::mem::size_of::<SHFILEINFOW>() as u32;
+        let flags = SHGFI_ICON | SHGFI_LARGEICON;
+
+        unsafe {
+            let res = SHGetFileInfoW(
+                PCWSTR(wide_path.as_ptr()),
+                windows::Win32::Storage::FileSystem::FILE_FLAGS_AND_ATTRIBUTES(0),
+                Some(&mut shfi),
+                cb_size,
+                flags,
+            );
+
+            if res != 0 && !shfi.hIcon.is_invalid() {
+                let wic_bitmap = self.wic_factory.CreateBitmapFromHICON(shfi.hIcon).ok();
+                let _ = DestroyIcon(shfi.hIcon);
+                if let Some(wic_bmp) = wic_bitmap {
+                    if let Ok(d2d_bmp) = d2d_context.CreateBitmapFromWicBitmap(&wic_bmp, None) {
+                        return Some(d2d_bmp.into());
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Decodes raw PNG/ICO/JPEG bytes into a Direct2D bitmap.
+    pub fn decode_image_bytes(
+        &self,
+        d2d_context: &ID2D1DeviceContext,
+        bytes: &[u8],
+    ) -> Option<ID2D1Bitmap> {
+        unsafe {
+            let stream: IWICStream = self.wic_factory.CreateStream().ok()?;
+            stream.InitializeFromMemory(bytes).ok()?;
+            let decoder = self
+                .wic_factory
+                .CreateDecoderFromStream(&stream, std::ptr::null(), WICDecodeMetadataCacheOnDemand)
+                .ok()?;
+            let frame = decoder.GetFrame(0).ok()?;
+            let converter = self.wic_factory.CreateFormatConverter().ok()?;
+            converter
+                .Initialize(
+                    &frame,
+                    &GUID_WICPixelFormat32bppPBGRA,
+                    WICBitmapDitherTypeNone,
+                    None,
+                    0.0,
+                    WICBitmapPaletteTypeCustom,
+                )
+                .ok()?;
+            let bmp1 = d2d_context.CreateBitmapFromWicBitmap(&converter, None).ok()?;
+            Some(bmp1.into())
+        }
+    }
+
+    /// Primary resolver: Retrieves real app icon using bytes, AUMID, or shortcut/executable search.
     pub fn get_icon(
         &mut self,
         d2d_context: &ID2D1DeviceContext,
         app_name: &str,
+        aumid: Option<&str>,
+        icon_bytes: Option<&[u8]>,
     ) -> Option<ID2D1Bitmap> {
-        if let Some(bitmap) = self.cache.get(app_name) {
+        let key = app_name.to_lowercase();
+        if let Some(bitmap) = self.cache.get(&key) {
             return Some(bitmap.clone());
         }
 
-        let app_path = Self::find_app_path(app_name)?;
-        let path_str = app_path.to_str()?;
-        let path_utf16: Vec<u16> = path_str.encode_utf16().chain(std::iter::once(0)).collect();
+        // 1. Direct logo bytes from WinRT notification
+        if let Some(bytes) = icon_bytes {
+            if let Some(bitmap) = self.decode_image_bytes(d2d_context, bytes) {
+                self.cache.insert(key.clone(), bitmap.clone());
+                return Some(bitmap);
+            }
+        }
 
-        unsafe {
-            let mut hicon_large: HICON = HICON::default();
-            let count = ExtractIconExW(
-                PCWSTR(path_utf16.as_ptr()),
-                0,
-                Some(&mut hicon_large),
-                None,
-                1,
-            );
+        // 2. AUMID Shell virtual folder lookup
+        if let Some(id) = aumid {
+            let folder_path = format!(r"shell:AppsFolder\{}", id);
+            if let Some(bitmap) = self.get_icon_from_path(d2d_context, Path::new(&folder_path)) {
+                self.cache.insert(key.clone(), bitmap.clone());
+                return Some(bitmap);
+            }
+        }
 
-            if count > 0 && !hicon_large.is_invalid() {
-                if let Ok(wic_bitmap) = self.wic_factory.CreateBitmapFromHICON(hicon_large) {
-                    if let Ok(d2d_bitmap) = d2d_context.CreateBitmapFromWicBitmap(&wic_bitmap, None) {
-                        let _ = DestroyIcon(hicon_large);
-                        let bitmap: ID2D1Bitmap = d2d_bitmap.into();
-                        self.cache.insert(app_name.to_string(), bitmap.clone());
-                        return Some(bitmap);
-                    }
-                }
-                let _ = DestroyIcon(hicon_large);
+        // 3. Start Menu Shortcuts & Executables
+        if let Some(app_path) = self.find_app_path(app_name) {
+            if let Some(bitmap) = self.get_icon_from_path(d2d_context, &app_path) {
+                self.cache.insert(key.clone(), bitmap.clone());
+                return Some(bitmap);
             }
         }
 

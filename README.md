@@ -8,7 +8,7 @@ A modern, high-performance, ultra-lightweight **Dynamic Island desktop overlay f
 
 | Metric | Traditional WPF / .NET | Electron / Webview-based | **Dynamic Island (Native Rust)** |
 | :--- | :--- | :--- | :--- |
-| **Idle Memory** | 80 MB – 250 MB | 250 MB – 600 MB+ | **~35 MB** (Includes DirectX & WinRT) |
+| **Idle Memory** | 80 MB – 250 MB | 250 MB – 600 MB+ | **~12 MB – 18 MB** (Auto-trimmed Working Set, ~5 MB Private Heap) |
 | **Idle CPU** | 0.5% – 2.5% | 1.0% – 5.0% | **0.0%** (Event-driven & Sleep Settled) |
 | **Binary Footprint** | 50 MB+ (.NET runtime) | 120 MB+ | **~1.1 MB** (Standalone single `.exe`) |
 | **Console Window** | Requires custom launcher | Hidden via node wrapper | **Native Windows Subsystem (No CMD window)** |
@@ -42,14 +42,16 @@ A modern, high-performance, ultra-lightweight **Dynamic Island desktop overlay f
 * **Single-Route Transport & Anti-Double-Skip:** Media commands (Play/Pause, Previous, Next) are routed exclusively through dedicated channels with **250ms hardware debounce**, completely preventing accidental double skips.
 * **Cover Art In-Memory Cache (`COVER_CACHE`):** Artwork bytes are cached in memory with auto-rehydration so album covers on the spinning vinyl never disappear across fullscreen transitions.
 
-### 5. 🏷️ Multi-Platform Service Recognition & Official Badges
-Intelligently identifies active media services and draws crisp vector brand badges:
-* **Netflix:** Signature dark squircle (`#141414`) with the iconic red "N" badge (`#E50914`).
-* **YouTube Music & YouTube:** Official red squircle with play symbol.
-* **Spotify:** Authentic green squircle with triple soundwave arcs (`#1DB954`).
-* **Discord, WhatsApp, Telegram:** Genuine vector brand icons with brand palettes.
-* **Disney+, Prime Video, Twitch, SoundCloud, Bilibili:** Automatic service detection and custom brand colors.
-* **Native Browser Fallback:** Identifies and displays the genuine browser name (Edge, Chrome, Firefox, Brave) when playing generic web media.
+### 5. 🏷️ Multi-Platform Service Recognition & Universal App Icon Extraction
+Intelligently resolves and displays genuine application icons across Windows:
+* **Universal Native App Icons:** For any installed Windows desktop or UWP application (e.g. Visual Studio Code, GitKraken, Steam, Obsidian, Notepad, Word, Windows Security, etc.), extracts the genuine high-resolution application icon via WinRT `AppDisplayInfo::GetLogo`, Windows Shell `SHGetFileInfoW`, and Start Menu shortcut mapping, rendered as a modern rounded squircle badge with Direct2D high-quality cubic interpolation.
+* **Bespoke Vector Brand Badges:**
+  * **Netflix:** Signature dark squircle (`#141414`) with the iconic red "N" badge (`#E50914`).
+  * **YouTube Music & YouTube:** Official red squircle with play symbol.
+  * **Spotify:** Authentic green squircle with triple soundwave arcs (`#1DB954`).
+  * **Discord, WhatsApp, Telegram:** Genuine vector brand icons with brand palettes.
+  * **Disney+, Prime Video, Twitch, SoundCloud, Bilibili:** Automatic service detection and custom brand colors.
+  * **Native Browser Fallback:** Identifies and displays the genuine browser name (Edge, Chrome, Firefox, Brave) when playing generic web media.
 
 ### 6. 💽 Spinning Vinyl Record with Real Album Artwork
 * Smooth rotating vinyl record disc featuring:

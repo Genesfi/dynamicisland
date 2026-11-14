@@ -165,6 +165,14 @@ pub fn parse_user_notification(user_notif: &UserNotification) -> Option<Notifica
         return None;
     }
 
+    let aumid = user_notif
+        .AppInfo()
+        .and_then(|info| info.AppUserModelId())
+        .map(|h| h.to_string())
+        .ok();
+
+    let icon_bytes = extract_logo_bytes(user_notif);
+
     let (badge_letter, badge_color) = get_app_badge_info(&app_name);
 
     Some(Notification {
@@ -174,7 +182,33 @@ pub fn parse_user_notification(user_notif: &UserNotification) -> Option<Notifica
         time_str: "now".to_string(),
         badge_letter,
         badge_color,
+        icon_bytes,
+        aumid,
     })
+}
+
+/// Attempts to extract the official high-resolution application logo bytes from WinRT AppDisplayInfo.
+fn extract_logo_bytes(user_notif: &UserNotification) -> Option<Vec<u8>> {
+    let app_info = user_notif.AppInfo().ok()?;
+    let disp = app_info.DisplayInfo().ok()?;
+    let size = windows::Foundation::Size { Width: 48.0, Height: 48.0 };
+    let stream_ref = disp.GetLogo(size).ok()?;
+    let stream_op = stream_ref.OpenReadAsync().ok()?;
+    let stream = wait_async(stream_op).ok()?;
+    let stream_len = stream.Size().ok()? as usize;
+    if stream_len == 0 {
+        return None;
+    }
+    let reader = windows::Storage::Streams::DataReader::CreateDataReader(&stream).ok()?;
+    let load_op = reader.LoadAsync(stream_len as u32).ok()?;
+    let load_info: windows_future::IAsyncInfo = load_op.cast().ok()?;
+    while load_info.Status().ok()? == windows_future::AsyncStatus::Started {
+        thread::sleep(Duration::from_millis(10));
+    }
+    let _ = load_op.GetResults().ok()?;
+    let mut bytes = vec![0u8; stream_len];
+    reader.ReadBytes(&mut bytes).ok()?;
+    Some(bytes)
 }
 
 /// Helper to wait on WinRT async operations synchronously on a background thread.
