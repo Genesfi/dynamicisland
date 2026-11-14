@@ -1,122 +1,122 @@
-# Dynamic Island (Native Windows 10 & 11 in Rust)
+# Dynamic Island for Windows (Native Rust)
 
-Sebuah aplikasi **Dynamic Island** desktop overlay modern berkinerja tinggi dan ultra-ringan untuk **Windows 10 & 11**, dibangun sepenuhnya menggunakan **Rust murni** dengan **DirectComposition**, **Direct2D Hardware Acceleration**, **DirectWrite**, native **WinRT UserNotificationListener**, **Windows Media Session (GSMTC)**, dan integrasi WebSocket **YTMPX**.
+A modern, high-performance, ultra-lightweight **Dynamic Island desktop overlay for Windows 10 & 11**, built from the ground up in pure **Rust** utilizing **DirectComposition**, **Direct2D (Hardware Accelerated)**, **DirectWrite**, native **WinRT UserNotificationListener**, **Windows Global System Media Transport Controls (GSMTC)**, and **YTMPX WebSocket** integration.
 
 ---
 
-## ⚡ Perbandingan & Benchmark
+## ⚡ Highlights & Architecture Comparison
 
-| Metrik | WPF / C# (misal: NabyScape) | Electron / Webview | **Dynamic Island (Rust Native)** |
+| Metric | Traditional WPF / .NET | Electron / Webview-based | **Dynamic Island (Native Rust)** |
 | :--- | :--- | :--- | :--- |
-| **Idle RAM** | 80 MB – 250 MB | 250 MB – 600 MB+ | **~35 MB** (Termasuk DirectX & WinRT) |
+| **Idle Memory** | 80 MB – 250 MB | 250 MB – 600 MB+ | **~35 MB** (Includes DirectX & WinRT) |
 | **Idle CPU** | 0.5% – 2.5% | 1.0% – 5.0% | **0.0%** (Event-driven & Sleep Settled) |
-| **Ukuran Executable** | 50 MB+ (.NET runtime) | 120 MB+ | **~1.1 MB** (Standalone single `.exe`) |
-| **Console Window** | Butuh launcher tambahan | Node wrapper tersembunyi | **Native Windows Subsystem (Tanpa CMD)** |
-| **Akselerasi Grafis** | WPF Composition | Chromium GPU Raster | **DirectComposition + Direct2D GPU Direct** |
-| **Transparansi & Klik**| Standard Layered Window | Web Transparent Window | **Hardware Premultiplied Alpha + Dynamic GDI HRGN** |
-| **Pengaturan (Settings)** | Form XAML berat | HTML / React form | **Fluent UI Direct2D Hardware Accelerated** |
+| **Binary Footprint** | 50 MB+ (.NET runtime) | 120 MB+ | **~1.1 MB** (Standalone single `.exe`) |
+| **Console Window** | Requires custom launcher | Hidden via node wrapper | **Native Windows Subsystem (No CMD window)** |
+| **Graphics Engine** | Software / WPF Composition | Chromium GPU Rasterizer | **DirectComposition + Direct2D (GPU Direct)** |
+| **Transparency & Clipping** | Layered Window GDI | Transparent Chromium View | **Hardware Premultiplied Alpha + Dynamic GDI HRGN** |
+| **Settings UI** | Heavy XAML Form | Web Form / React | **Hardware-Accelerated Direct2D Fluent UI** |
 
 ---
 
-## 🌟 Fitur Utama & Keunggulan
+## 🌟 Key Features
 
-### 1. 🛡️ Dynamic Window Clipping Region (Zero Click Blocking)
-* Menggunakan pemotongan region OS tingkat kernel (**GDI `SetWindowRgn`**) yang secara dinamis mengikuti bentuk kapsul kapsul secara presisi.
-* Area di luar kapsul kapsul **secara fisik tidak ada bagi Windows Window Manager**.
-* **Hasil:** Anda dapat mengklik tab browser, tombol bookmark, kolom pencarian, atau breadcrumb File Explorer tepat di samping kapsul tanpa terhalang sedikit pun.
-* Disertai bantalan padding 16px dinamis sehingga pancaran efek **Soft Ambient Glow** tetap tampil halus dan tidak terpotong.
+### 1. 🛡️ Dynamic Window Clipping Region (Zero Click Interference)
+* Utilizes dynamic kernel-level OS window region clipping (**GDI `SetWindowRgn`**) that tightly contours to the exact pill capsule shape.
+* Pixels outside the visible capsule **physically do not exist** to the Windows Window Manager.
+* **Benefit:** You can click browser tabs, bookmark bars, address bars, or File Explorer breadcrumbs directly adjacent to the island with 100% precision and zero hit-blocking.
+* Features dynamic 16px padding so soft ambient luminous glow remains butter-smooth and unclipped.
 
-### 2. 🎬 Fullscreen Auto-Hide (Netflix, YouTube, Game)
-* Otomatis mendeteksi saat ada aplikasi latar depan yang masuk ke mode layar penuh (**Fullscreen**), seperti menonton film di **Netflix**, video **YouTube Fullscreen**, media player (VLC/MPC), maupun bermain **Game**.
-* Saat Fullscreen aktif, Island secara mulus meluncur keluar layar (`y: -100px`) dan mematikan opasitasnya (0%).
-* Saat keluar dari fullscreen (misal menekan `Esc`), Island meluncur kembali secara elegan tanpa jeda.
+### 2. 🎬 Fullscreen Auto-Hide (Netflix, YouTube, Games)
+* Automatically detects when any active foreground application enters **Fullscreen** mode (e.g. streaming **Netflix**, **YouTube Fullscreen**, video players like VLC, or **3D Games**).
+* Smoothly glides off-screen (`y: -100px`) and transitions opacity to 0% with hardware region zeroing.
+* Automatically and seamlessly slides back into view when exiting fullscreen mode.
 
 ### 3. 🧭 Smart Dynamic Contour Avoidance
-* **Otomatis Bergeser di Browser:** Saat jendela browser (Chrome, Edge, Brave, Firefox, Opera, Vivaldi) aktif dan menempel di bagian atas layar, Island otomatis meluncur turun sejauh **34px** (`contour_nudge_y`), memberikan ruang penuh bagi tab browser agar tetap terlihat dan mudah diklik.
-* **Kembali ke Posisi Atas:** Saat beralih ke **File Explorer**, Desktop, atau aplikasi lain, Island otomatis meluncur kembali ke posisi paling atas (`0px`).
-* Jarak pergeseran dapat diatur secara bebas melalui menu Settings.
+* **Browser Tab Strip Clearance:** When a web browser (Chrome, Edge, Brave, Firefox, Opera, Vivaldi) is maximized or docked at the top of the monitor, the island automatically nudges down by **34px** (`contour_nudge_y`), perfectly positioning itself below the browser tabs so all tabs remain unobstructed and clickable.
+* **Top Flush Auto-Restoration:** Automatically returns flush to the top edge (`0px`) when switching to File Explorer, Desktop, or non-browser windows.
+* Nudge distance is fully customizable via the interactive Settings UI.
 
-### 4. 🎵 Kontrol Media Lanjutan & Integrasi YTMPX
-* **Dukungan Penuh YouTube Music Desktop (Tauri) & Browser:** Terhubung via WebSocket `ws://127.0.0.1:8765` (YTMPX) dan GSMTC Windows.
-* **Buka / Toggle Pemutar Musik:** Mengklik kapsul musik akan langsung memanggil atau memulihkan jendela aplikasi Tauri YTM/Spotify dari system tray secara native.
-* **Single-Route & Anti Double-Skip:** Mengatasi bug *double next/prev* dengan merutekan sinyal media secara eksklusif dan dilengkapi filter **debounce hardware 250ms**.
-* **Cover Art Cache & Auto-Rehydration:** Gambar album tersimpan di RAM cache (`COVER_CACHE`) sehingga gambar pada piringan vinyl **tidak akan pernah hilang** saat kembali dari mode Fullscreen.
+### 4. 🎵 Advanced Media Controls & YTMPX Integration
+* **YouTube Music Desktop (Tauri) & Web Players:** Integrates via real-time WebSocket (`ws://127.0.0.1:8765` YTMPX) and Windows GSMTC.
+* **Native Window Activation:** Clicking the capsule brings or restores the player application (Tauri YTM, Spotify, or browser tab) natively from the system tray.
+* **Single-Route Transport & Anti-Double-Skip:** Media commands (Play/Pause, Previous, Next) are routed exclusively through dedicated channels with **250ms hardware debounce**, completely preventing accidental double skips.
+* **Cover Art In-Memory Cache (`COVER_CACHE`):** Artwork bytes are cached in memory with auto-rehydration so album covers on the spinning vinyl never disappear across fullscreen transitions.
 
-### 5. 🏷️ Deteksi Layanan Streaming & Ikon Vektor Resmi
-Mendeteksi secara cerdas berbagai platform media dan menampilkan ikon vektor resmi:
-* **Netflix:** Ikon resmi squircle hitam arang dengan pita huruf **"N" merah signature** (`#E50914`).
-* **YouTube Music & YouTube:** Ikon play button merah resmi (`#FF0000`).
-* **Spotify:** Ikon gelombang suara hijau vibrant (`#1DB954`).
-* **Discord, WhatsApp, Telegram:** Ikon resmi dengan palet warna brand asli.
-* **Disney+, Prime Video, Twitch, SoundCloud, Bilibili:** Terdeteksi otomatis beserta nama dan warna khasnya.
-* **Web Media / Browser Fallback:** Menampilkan nama asli browser (Edge, Chrome, Firefox) jika memutar video web umum.
+### 5. 🏷️ Multi-Platform Service Recognition & Official Badges
+Intelligently identifies active media services and draws crisp vector brand badges:
+* **Netflix:** Signature dark squircle (`#141414`) with the iconic red "N" badge (`#E50914`).
+* **YouTube Music & YouTube:** Official red squircle with play symbol.
+* **Spotify:** Authentic green squircle with triple soundwave arcs (`#1DB954`).
+* **Discord, WhatsApp, Telegram:** Genuine vector brand icons with brand palettes.
+* **Disney+, Prime Video, Twitch, SoundCloud, Bilibili:** Automatic service detection and custom brand colors.
+* **Native Browser Fallback:** Identifies and displays the genuine browser name (Edge, Chrome, Firefox, Brave) when playing generic web media.
 
-### 6. 💽 Piringan Vinyl Berputar (Spinning Vinyl Disc)
-* Animasi piringan hitam vinyl berputar saat lagu diputar, lengkap dengan:
-  * 4 alur lingkaran konsentris (*microgrooves*).
-  * 2 berkas kilau cahaya specular anisotropik 180 derajat.
-  * Gambar album asli berputar di tengah piringan dengan lubang poros (*spindle hole*).
-* **WASAPI Audio Metering:** Visualizer bar equalizer dinamis yang bereaksi terhadap dentuman audio nyata dari kartu suara PC Anda.
+### 6. 💽 Spinning Vinyl Record with Real Album Artwork
+* Smooth rotating vinyl record disc featuring:
+  * 4 concentric microgroove rings.
+  * Dual opposing 180° anisotropic specular light sheen highlights.
+  * Centered real album artwork rotating with the disc and spindle hole cutout.
+* **WASAPI Audio Metering:** Real-time PC audio peak metering that reacts dynamically to PC audio output.
 
-### 7. ⏱️ Hover-to-Expand dengan Dwell Time
-* Untuk mencegah Island melebar tanpa sengaja saat kursor mouse sekilas melintasi tepi atas layar, diterapkan **hover dwell delay 180ms**.
-* Island hanya akan melebar menampilkan kontrol penuh jika kursor diarahkan secara sengaja.
+### 7. ⏱️ Hover-to-Expand with Dwell Protection
+* Features a **180ms hover dwell delay** to prevent accidental expansion when the mouse cursor briefly moves across the top of the screen.
+* Smoothly expands to reveal full media playback controls only when deliberately hovered.
 
-### 8. ⚙️ Panel Pengaturan Fluent UI Direct2D
-Klik kanan ikon di tray bar pojok kanan bawah $\rightarrow$ pilih **⚙ Settings...** (atau double click ikon tray):
-* **Slider Interaktif:**
-  * Jarak dari Atas Layar (*Top Margin*).
-  * Jarak Nudge Kontur Browser (*Browser Contour Nudge*).
-  * Lebar Kapsul Musik (*Compact Music Width*).
-  * Durasi Tampil Notifikasi (*Display Duration*).
-  * Opasitas Island (*Island Opacity*).
-  * Intensitas Ambient Glow (*Glow Intensity*).
-  * Kecepatan Putaran Vinyl (*Vinyl Spin Speed*).
-* **Toggle Sakelar:**
-  * Dynamic Album Glow Color (Warna glow menyala sesuai warna dominan album).
-  * Enable Media Island & Vinyl Animation.
-  * Hover Expand Media.
+### 8. ⚙️ Interactive Fluent Direct2D Settings Window
+Access via System Tray context menu $\rightarrow$ **⚙ Settings...** (or double-click the tray icon):
+* **Sliders:**
+  * Vertical Screen Offset (*Top Margin*).
+  * Browser Clearance Distance (*Browser Contour Nudge*).
+  * Compact Music Capsule Width (*Compact Music Width*).
+  * Notification Display Duration (*Display Duration*).
+  * Capsule Opacity (*Island Opacity*).
+  * Luminous Ambient Glow (*Glow Intensity*).
+  * Vinyl Rotation Speed (*Vinyl Spin Speed*).
+* **Toggles:**
+  * Dynamic Album Glow Color (Halo dynamically tints to match dominant artwork colors).
+  * Media Island & Vinyl Animation.
+  * Hover-to-Expand.
   * Idle Click-Through.
   * Smart Dynamic Contour.
-  * Run on Windows Startup (Autostart).
-* **Pilihan Gaya Tampilan:**
+  * Run on Windows Startup.
+* **Visual Styles:**
   * *Modern Minimal*, *Sleek Capsule*, *Notch Dynamic*.
-  * Tampilan Compact: *Combined (Title + Wave)*, *Title Only*, *Wave Only*.
-* **Auto-Save Instant:** Setiap perubahan langsung disimpan ke `config.txt` dan diperbarui secara instan tanpa perlu restart.
+  * Compact Views: *Combined (Title + Wave)*, *Title Only*, *Wave Only*.
+* **Instant Auto-Save:** Changes are persisted to `config.txt` and hot-reloaded into the running overlay without restarting.
 
 ---
 
-## 🚀 Cara Menjalankan
+## 🚀 Getting Started
 
-### Menjalankan Binary Langsung:
-Jalankan file executable hasil kompilasi:
+### Run Pre-built Binary
+Run the compiled standalone executable:
 > [`target/release/dynamic_island.exe`](file:///f:/Native%20Win/DynamicNotification/target/release/dynamic_island.exe)
 
-### Kompilasi dari Source Code:
-Pastikan Rust toolchain sudah terpasang di komputer Anda:
+### Build from Source
+Ensure you have the Rust toolchain installed:
 ```powershell
-# Jalankan mode release
+# Run directly in release mode
 cargo run --release
 
-# Atau kompilasi binary mandiri
+# Or build the standalone release binary
 cargo build --release
 ```
 
 ---
 
-## ⌨️ Pintasan & Interaksi
+## ⌨️ Controls & Shortcuts
 
-| Aksi | Fungsi |
+| Action | Result |
 | :--- | :--- |
-| **Arahkan Kursor (>180ms)** | Membuka kontrol media penuh (Play/Pause, Prev, Next, Waveform) |
-| **Klik Tombol Prev / Next** | Pindah lagu (dilengkapi proteksi debounce anti double-skip) |
-| **Klik Tombol Play / Pause**| Menghentikan sementara atau melanjutkan pemutaran lagu |
-| **Klik Permukaan Kapsul**   | Membuka/memulihkan aplikasi pemutar musik (Tauri YTM / Spotify / Browser) |
-| **Klik di Luar Kapsul**     | Menutup panel ekspansi kembali ke bentuk kapsul ramping |
-| **Klik Kanan Ikon Tray**    | Membuka menu konteks (Settings, Autostart, Exit) |
-| **Tekan `Esc`**             | Menutup ekspansi Island secara halus |
+| **Hover Cursor (>180ms)** | Expands to full media controls (Play/Pause, Previous, Next, Waveform) |
+| **Click Prev / Next** | Skip tracks (protected with 250ms anti-bounce debounce) |
+| **Click Play / Pause** | Toggle playback |
+| **Click Capsule Surface** | Brings / restores player window (Tauri YTM, Spotify, or browser) |
+| **Click Outside Capsule** | Dismisses expansion back to sleek pill |
+| **Right-Click Tray Icon** | Opens context menu (Settings, Autostart, Exit) |
+| **Press `Esc`** | Smoothly dismisses expanded island view |
 
 ---
 
-## 📄 Lisensi
-Dilisensikan di bawah **MIT License**. Bebas dimodifikasi, didistribusikan, dan digunakan untuk proyek pribadi maupun komersial.
+## 📄 License
+Licensed under the **MIT License**. Free for personal, academic, and commercial use.
