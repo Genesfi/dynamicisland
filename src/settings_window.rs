@@ -25,7 +25,7 @@ use windows::{
 static SETTINGS_OPEN: AtomicBool = AtomicBool::new(false);
 
 const CLIENT_WIDTH: u32 = 520;
-const CLIENT_HEIGHT: u32 = 560;
+const CLIENT_HEIGHT: u32 = 680;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsTab {
@@ -54,13 +54,16 @@ const SLIDER_CARD_OPACITY: (f32, f32, f32, f32) = (20.0, 400.0, 500.0, 448.0);
 const SLIDER_CARD_GLOW: (f32, f32, f32, f32) = (20.0, 454.0, 500.0, 502.0);
 
 // --- Tab 1: Music & Audio Coordinates ---
-const TOGGLE_CARD_DYNAMIC_COLOR: (f32, f32, f32, f32) = (20.0, 126.0, 500.0, 168.0);
-const TOGGLE_CARD_AUDIO_VIZ: (f32, f32, f32, f32) = (20.0, 172.0, 500.0, 214.0);
-const TOGGLE_CARD_VINYL_ANIM: (f32, f32, f32, f32) = (20.0, 218.0, 500.0, 260.0);
-const TOGGLE_CARD_HOVER_EXPAND: (f32, f32, f32, f32) = (20.0, 264.0, 500.0, 306.0);
-const TOGGLE_CARD_FULL_CARD: (f32, f32, f32, f32) = (20.0, 310.0, 500.0, 352.0);
-const SLIDER_CARD_VINYL_SPEED: (f32, f32, f32, f32) = (20.0, 370.0, 500.0, 418.0);
-const SLIDER_CARD_COMPACT_WIDTH: (f32, f32, f32, f32) = (20.0, 442.0, 500.0, 490.0);
+const TOGGLE_CARD_DYNAMIC_COLOR: (f32, f32, f32, f32) = (20.0, 126.0, 500.0, 166.0);
+const TOGGLE_CARD_AUDIO_VIZ: (f32, f32, f32, f32) = (20.0, 170.0, 500.0, 210.0);
+const TOGGLE_CARD_VINYL_ANIM: (f32, f32, f32, f32) = (20.0, 214.0, 500.0, 254.0);
+const TOGGLE_CARD_HOVER_EXPAND: (f32, f32, f32, f32) = (20.0, 258.0, 500.0, 298.0);
+const TOGGLE_CARD_SHOW_LYRICS_CAPSULE: (f32, f32, f32, f32) = (20.0, 302.0, 500.0, 342.0);
+const TOGGLE_CARD_ROMANIZE_CJK: (f32, f32, f32, f32) = (20.0, 346.0, 500.0, 386.0);
+const TOGGLE_CARD_FULL_CARD: (f32, f32, f32, f32) = (20.0, 390.0, 500.0, 430.0);
+const SLIDER_CARD_VINYL_SPEED: (f32, f32, f32, f32) = (20.0, 460.0, 500.0, 508.0);
+const SLIDER_CARD_COMPACT_WIDTH: (f32, f32, f32, f32) = (20.0, 542.0, 500.0, 590.0);
+const SLIDER_CARD_LYRICS_WIDTH: (f32, f32, f32, f32) = (20.0, 598.0, 500.0, 646.0);
 
 // --- Tab 2: System & Behavior Coordinates ---
 const TOGGLE_CARD_STARTUP: (f32, f32, f32, f32) = (20.0, 134.0, 500.0, 180.0);
@@ -112,12 +115,15 @@ struct SettingsState {
     glow_intensity: f32,
     vinyl_speed: f32,
     compact_music_width: f32,
+    compact_lyrics_width: f32,
     island_style: IslandStyle,
     compact_view: CompactDisplayMode,
     dynamic_color: bool,
     enable_media: bool,
     enable_vinyl: bool,
     hover_expand: bool,
+    show_lyrics_capsule: bool,
+    romanize_cjk_lyrics: bool,
     use_full_media_card: bool,
     click_through: bool,
     smart_contour: bool,
@@ -139,6 +145,7 @@ impl SettingsState {
             vinyl_speed: self.vinyl_speed,
             compact_mode_view: self.compact_view,
             compact_music_width: self.compact_music_width,
+            compact_lyrics_width: self.compact_lyrics_width,
             dynamic_album_color: self.dynamic_color,
             enable_media_island: self.enable_media,
             enable_vinyl_animation: self.enable_vinyl,
@@ -148,17 +155,28 @@ impl SettingsState {
             contour_nudge_y: self.contour_nudge_y,
             start_with_windows: self.start_with_windows,
             use_full_media_card: self.use_full_media_card,
+            show_lyrics_in_capsule: self.show_lyrics_capsule,
+            romanize_cjk_lyrics: self.romanize_cjk_lyrics,
         };
         cfg.save();
 
-        let _ = unsafe {
-            PostMessageW(
-                Some(self.parent_hwnd),
-                crate::tray::WM_CONFIG_CHANGED,
-                WPARAM(0),
-                LPARAM(0),
-            )
+        let target_hwnd = if !self.parent_hwnd.0.is_null() && unsafe { IsWindow(Some(self.parent_hwnd)).as_bool() } {
+            self.parent_hwnd
+        } else {
+            let class_name = w!("DynamicIslandOverlayClass");
+            unsafe { FindWindowW(class_name, None).unwrap_or_default() }
         };
+
+        if !target_hwnd.0.is_null() {
+            let _ = unsafe {
+                PostMessageW(
+                    Some(target_hwnd),
+                    crate::tray::WM_CONFIG_CHANGED,
+                    WPARAM(0),
+                    LPARAM(0),
+                )
+            };
+        }
     }
 
     // --- Vector SVG Drawing Helpers ---
@@ -238,6 +256,39 @@ impl SettingsState {
         self.d2d_target.DrawEllipse(&outer, &self.brush_icon, 1.3, None);
         self.d2d_target.DrawEllipse(&inner, &self.brush_icon, 1.0, None);
         self.d2d_target.FillEllipse(&hole, &self.brush_icon);
+    }
+
+    unsafe fn draw_lyrics_bubble_icon(&self, cx: f32, cy: f32) {
+        let bw = 15.0;
+        let bh = 11.5;
+        let bubble_rect = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F {
+                left: cx - bw * 0.5,
+                top: cy - bh * 0.5 - 1.0,
+                right: cx + bw * 0.5,
+                bottom: cy + bh * 0.5 - 1.0,
+            },
+            radiusX: 3.0,
+            radiusY: 3.0,
+        };
+        self.d2d_target.DrawRoundedRectangle(&bubble_rect, &self.brush_icon, 1.3, None);
+        let tail_x = cx - 3.0;
+        let tail_y = cy + bh * 0.5 - 1.0;
+        self.d2d_target.DrawLine(pt(tail_x, tail_y), pt(tail_x - 2.5, tail_y + 3.0), &self.brush_icon, 1.3, None);
+        self.d2d_target.DrawLine(pt(tail_x - 2.5, tail_y + 3.0), pt(tail_x + 2.5, tail_y), &self.brush_icon, 1.3, None);
+        self.d2d_target.DrawLine(pt(cx - 3.5, cy - 1.5), pt(cx + 3.5, cy - 1.5), &self.brush_icon, 1.1, None);
+        self.d2d_target.DrawLine(pt(cx - 2.0, cy + 1.5), pt(cx + 2.0, cy + 1.5), &self.brush_icon, 1.1, None);
+    }
+
+    unsafe fn draw_language_icon(&self, cx: f32, cy: f32) {
+        // Pure vector glyph for translation / Romaji without emojis
+        self.d2d_target.DrawLine(pt(cx - 5.5, cy + 5.0), pt(cx - 1.5, cy - 5.0), &self.brush_icon, 1.3, None);
+        self.d2d_target.DrawLine(pt(cx - 1.5, cy - 5.0), pt(cx + 2.5, cy + 5.0), &self.brush_icon, 1.3, None);
+        self.d2d_target.DrawLine(pt(cx - 3.8, cy + 1.5), pt(cx + 0.8, cy + 1.5), &self.brush_icon, 1.2, None);
+        // Small Kana/symbol element
+        self.d2d_target.DrawLine(pt(cx + 4.5, cy - 3.5), pt(cx + 7.5, cy - 3.5), &self.brush_icon, 1.1, None);
+        self.d2d_target.DrawLine(pt(cx + 6.0, cy - 5.0), pt(cx + 6.0, cy + 3.5), &self.brush_icon, 1.1, None);
+        self.d2d_target.DrawLine(pt(cx + 4.2, cy + 3.5), pt(cx + 7.5, cy + 2.0), &self.brush_icon, 1.1, None);
     }
 
     unsafe fn draw_cursor_icon(&self, cx: f32, cy: f32) {
@@ -515,12 +566,15 @@ pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
             glow_intensity: cfg.glow_intensity,
             vinyl_speed: cfg.vinyl_speed,
             compact_music_width: cfg.compact_music_width,
+            compact_lyrics_width: cfg.compact_lyrics_width,
             island_style: cfg.island_style,
             compact_view: cfg.compact_mode_view,
             dynamic_color: cfg.dynamic_album_color,
             enable_media: cfg.enable_media_island,
             enable_vinyl: cfg.enable_vinyl_animation,
             hover_expand: cfg.hover_expand_media,
+            show_lyrics_capsule: cfg.show_lyrics_in_capsule,
+            romanize_cjk_lyrics: cfg.romanize_cjk_lyrics,
             use_full_media_card: cfg.use_full_media_card,
             click_through: cfg.idle_click_through,
             smart_contour: cfg.smart_contour,
@@ -770,7 +824,9 @@ unsafe extern "system" fn settings_wndproc(
                             (TOGGLE_CARD_AUDIO_VIZ, "Real-time Audio Visualizer (WASAPI)", "Reactive symmetric waveform driven by PC speaker sound", state.enable_media, 1),
                             (TOGGLE_CARD_VINYL_ANIM, "Spinning Vinyl Disc Animation", "Rotating vinyl record & album cover artwork during playback", state.enable_vinyl, 2),
                             (TOGGLE_CARD_HOVER_EXPAND, "Hover to Expand Media", "Smoothly expand compact island into controls when hovered", state.hover_expand, 3),
-                            (TOGGLE_CARD_FULL_CARD, "Full Media Control Card on Hover", "Directly expand into rich card with seek bar & volume slider", state.use_full_media_card, 4),
+                            (TOGGLE_CARD_SHOW_LYRICS_CAPSULE, "Show Synced Lyrics in Capsule Bar", "Display live sing-along lyrics directly in compact idle bar", state.show_lyrics_capsule, 4),
+                            (TOGGLE_CARD_ROMANIZE_CJK, "Romanize CJK Lyrics (Romaji / Romaja)", "Transliterate Japanese Kanji/Kana & Korean Hangul to Latin", state.romanize_cjk_lyrics, 6),
+                            (TOGGLE_CARD_FULL_CARD, "Full Media Control Card on Hover", "Directly expand into rich card with seek bar & volume slider", state.use_full_media_card, 5),
                         ];
 
                         for (rect_f, title, desc, is_on, t_idx) in toggles {
@@ -789,7 +845,9 @@ unsafe extern "system" fn settings_wndproc(
                                 1 => state.draw_visualizer_icon(icon_cx, icon_cy),
                                 2 => state.draw_vinyl_icon(icon_cx, icon_cy),
                                 3 => state.draw_cursor_icon(icon_cx, icon_cy),
-                                4 => state.draw_desktop_icon(icon_cx, icon_cy),
+                                4 => state.draw_lyrics_bubble_icon(icon_cx, icon_cy),
+                                5 => state.draw_desktop_icon(icon_cx, icon_cy),
+                                6 => state.draw_language_icon(icon_cx, icon_cy),
                                 _ => {}
                             }
 
@@ -823,7 +881,7 @@ unsafe extern "system" fn settings_wndproc(
                         }
 
                         // Section 2: VINYL ROTATION SPEED
-                        let sec2_rect = D2D_RECT_F { left: 22.0, top: 356.0, right: 400.0, bottom: 372.0 };
+                        let sec2_rect = D2D_RECT_F { left: 22.0, top: 438.0, right: 400.0, bottom: 454.0 };
                         let sec2_utf: Vec<u16> = "VINYL ROTATION SPEED".encode_utf16().collect();
                         state.d2d_target.DrawText(&sec2_utf, &state.format_sec_title, &sec2_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
@@ -862,11 +920,12 @@ unsafe extern "system" fn settings_wndproc(
                         };
                         state.d2d_target.FillEllipse(&thumb, &state.brush_text_white);
 
-                        // Section 3: COMPACT MUSIC PILL WIDTH
-                        let sec3_rect = D2D_RECT_F { left: 22.0, top: 428.0, right: 400.0, bottom: 444.0 };
-                        let sec3_utf: Vec<u16> = "COMPACT MUSIC PILL WIDTH (IDLE)".encode_utf16().collect();
+                        // Section 3: CAPSULE WIDTH & DYNAMIC SIZING
+                        let sec3_rect = D2D_RECT_F { left: 22.0, top: 520.0, right: 400.0, bottom: 536.0 };
+                        let sec3_utf: Vec<u16> = "CAPSULE WIDTH & DYNAMIC SIZING".encode_utf16().collect();
                         state.d2d_target.DrawText(&sec3_utf, &state.format_sec_title, &sec3_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
+                        // Slider Card 1: Standard Capsule Width
                         let card_rect = D2D1_ROUNDED_RECT {
                             rect: D2D_RECT_F { left: SLIDER_CARD_COMPACT_WIDTH.0, top: SLIDER_CARD_COMPACT_WIDTH.1, right: SLIDER_CARD_COMPACT_WIDTH.2, bottom: SLIDER_CARD_COMPACT_WIDTH.3 },
                             radiusX: 7.0,
@@ -877,7 +936,7 @@ unsafe extern "system" fn settings_wndproc(
 
                         state.draw_desktop_icon(SLIDER_CARD_COMPACT_WIDTH.0 + 22.0, SLIDER_CARD_COMPACT_WIDTH.1 + 19.0);
 
-                        let title_utf: Vec<u16> = "Capsule Width (160px - 420px)".encode_utf16().collect();
+                        let title_utf: Vec<u16> = "Standard Music Width (160px - 360px)".encode_utf16().collect();
                         let t_rect = D2D_RECT_F { left: SLIDER_CARD_COMPACT_WIDTH.0 + 38.0, top: SLIDER_CARD_COMPACT_WIDTH.1 + 8.0, right: SLIDER_CARD_COMPACT_WIDTH.2 - 80.0, bottom: SLIDER_CARD_COMPACT_WIDTH.1 + 26.0 };
                         state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
@@ -886,7 +945,7 @@ unsafe extern "system" fn settings_wndproc(
                         let v_rect = D2D_RECT_F { left: SLIDER_CARD_COMPACT_WIDTH.2 - 90.0, top: SLIDER_CARD_COMPACT_WIDTH.1 + 8.0, right: SLIDER_CARD_COMPACT_WIDTH.2 - 14.0, bottom: SLIDER_CARD_COMPACT_WIDTH.1 + 26.0 };
                         state.d2d_target.DrawText(&val_utf, &state.format_badge, &v_rect as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-                        let norm = ((state.compact_music_width - 160.0) / 260.0).clamp(0.0, 1.0);
+                        let norm = ((state.compact_music_width - 160.0) / 200.0).clamp(0.0, 1.0);
                         let track_y = SLIDER_CARD_COMPACT_WIDTH.1 + 35.0;
                         let track_x1 = SLIDER_CARD_COMPACT_WIDTH.0 + 14.0;
                         let track_x2 = SLIDER_CARD_COMPACT_WIDTH.2 - 14.0;
@@ -901,6 +960,42 @@ unsafe extern "system" fn settings_wndproc(
                             radiusY: 6.5,
                         };
                         state.d2d_target.FillEllipse(&thumb, &state.brush_text_white);
+
+                        // Slider Card 2: Active Lyrics Expanded Width
+                        let card_rect2 = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: SLIDER_CARD_LYRICS_WIDTH.0, top: SLIDER_CARD_LYRICS_WIDTH.1, right: SLIDER_CARD_LYRICS_WIDTH.2, bottom: SLIDER_CARD_LYRICS_WIDTH.3 },
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        state.d2d_target.FillRoundedRectangle(&card_rect2, &state.brush_card);
+                        state.d2d_target.DrawRoundedRectangle(&card_rect2, &state.brush_card_border, 1.0, None);
+
+                        state.draw_lyrics_bubble_icon(SLIDER_CARD_LYRICS_WIDTH.0 + 22.0, SLIDER_CARD_LYRICS_WIDTH.1 + 19.0);
+
+                        let title_utf2: Vec<u16> = "Expanded Lyrics Width (200px - 440px)".encode_utf16().collect();
+                        let t_rect2 = D2D_RECT_F { left: SLIDER_CARD_LYRICS_WIDTH.0 + 38.0, top: SLIDER_CARD_LYRICS_WIDTH.1 + 8.0, right: SLIDER_CARD_LYRICS_WIDTH.2 - 80.0, bottom: SLIDER_CARD_LYRICS_WIDTH.1 + 26.0 };
+                        state.d2d_target.DrawText(&title_utf2, &state.format_card_title, &t_rect2 as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let val_str2 = format!("{:.0} px", state.compact_lyrics_width);
+                        let val_utf2: Vec<u16> = val_str2.encode_utf16().collect();
+                        let v_rect2 = D2D_RECT_F { left: SLIDER_CARD_LYRICS_WIDTH.2 - 90.0, top: SLIDER_CARD_LYRICS_WIDTH.1 + 8.0, right: SLIDER_CARD_LYRICS_WIDTH.2 - 14.0, bottom: SLIDER_CARD_LYRICS_WIDTH.1 + 26.0 };
+                        state.d2d_target.DrawText(&val_utf2, &state.format_badge, &v_rect2 as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let norm2 = ((state.compact_lyrics_width - 200.0) / 240.0).clamp(0.0, 1.0);
+                        let track_y2 = SLIDER_CARD_LYRICS_WIDTH.1 + 35.0;
+                        let track_x1_2 = SLIDER_CARD_LYRICS_WIDTH.0 + 14.0;
+                        let track_x2_2 = SLIDER_CARD_LYRICS_WIDTH.2 - 14.0;
+
+                        state.d2d_target.DrawLine(pt(track_x1_2, track_y2), pt(track_x2_2, track_y2), &state.brush_card_border, 3.5, None);
+                        let fill_x2 = track_x1_2 + norm2 * (track_x2_2 - track_x1_2);
+                        state.d2d_target.DrawLine(pt(track_x1_2, track_y2), pt(fill_x2, track_y2), &state.brush_accent, 3.5, None);
+
+                        let thumb2 = D2D1_ELLIPSE {
+                            point: windows_numerics::Vector2 { X: fill_x2, Y: track_y2 },
+                            radiusX: 6.5,
+                            radiusY: 6.5,
+                        };
+                        state.d2d_target.FillEllipse(&thumb2, &state.brush_text_white);
                     }
 
                     SettingsTab::System => {
@@ -1101,6 +1196,12 @@ unsafe extern "system" fn settings_wndproc(
                         } else if in_rect(x, y, TOGGLE_CARD_HOVER_EXPAND) {
                             state.hover_expand = !state.hover_expand;
                             state.auto_save();
+                        } else if in_rect(x, y, TOGGLE_CARD_SHOW_LYRICS_CAPSULE) {
+                            state.show_lyrics_capsule = !state.show_lyrics_capsule;
+                            state.auto_save();
+                        } else if in_rect(x, y, TOGGLE_CARD_ROMANIZE_CJK) {
+                            state.romanize_cjk_lyrics = !state.romanize_cjk_lyrics;
+                            state.auto_save();
                         } else if in_rect(x, y, TOGGLE_CARD_FULL_CARD) {
                             state.use_full_media_card = !state.use_full_media_card;
                             state.auto_save();
@@ -1113,7 +1214,13 @@ unsafe extern "system" fn settings_wndproc(
                         } else if in_rect(x, y, SLIDER_CARD_COMPACT_WIDTH) {
                             state.dragging_slider = Some(5);
                             let norm = ((x - (SLIDER_CARD_COMPACT_WIDTH.0 + 14.0)) / (SLIDER_CARD_COMPACT_WIDTH.2 - SLIDER_CARD_COMPACT_WIDTH.0 - 28.0)).clamp(0.0, 1.0);
-                            state.compact_music_width = ((160.0 + norm * 260.0) / 5.0).round() * 5.0;
+                            state.compact_music_width = ((160.0 + norm * 200.0) / 5.0).round() * 5.0;
+                            state.auto_save();
+                            SetCapture(hwnd);
+                        } else if in_rect(x, y, SLIDER_CARD_LYRICS_WIDTH) {
+                            state.dragging_slider = Some(6);
+                            let norm = ((x - (SLIDER_CARD_LYRICS_WIDTH.0 + 14.0)) / (SLIDER_CARD_LYRICS_WIDTH.2 - SLIDER_CARD_LYRICS_WIDTH.0 - 28.0)).clamp(0.0, 1.0);
+                            state.compact_lyrics_width = ((200.0 + norm * 240.0) / 5.0).round() * 5.0;
                             state.auto_save();
                             SetCapture(hwnd);
                         }
@@ -1182,7 +1289,12 @@ unsafe extern "system" fn settings_wndproc(
                         }
                         5 => {
                             let norm = ((x - (SLIDER_CARD_COMPACT_WIDTH.0 + 14.0)) / (SLIDER_CARD_COMPACT_WIDTH.2 - SLIDER_CARD_COMPACT_WIDTH.0 - 28.0)).clamp(0.0, 1.0);
-                            state.compact_music_width = ((160.0 + norm * 260.0) / 5.0).round() * 5.0;
+                            state.compact_music_width = ((160.0 + norm * 200.0) / 5.0).round() * 5.0;
+                            state.auto_save();
+                        }
+                        6 => {
+                            let norm = ((x - (SLIDER_CARD_LYRICS_WIDTH.0 + 14.0)) / (SLIDER_CARD_LYRICS_WIDTH.2 - SLIDER_CARD_LYRICS_WIDTH.0 - 28.0)).clamp(0.0, 1.0);
+                            state.compact_lyrics_width = ((200.0 + norm * 240.0) / 5.0).round() * 5.0;
                             state.auto_save();
                         }
                         _ => {}

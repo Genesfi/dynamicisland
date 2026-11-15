@@ -24,6 +24,7 @@ pub enum MediaEvent {
         position_secs: f32,
         duration_secs: f32,
     },
+    LyricsLoaded(crate::lyrics::SongLyrics),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -323,12 +324,13 @@ fn handle_ytmpx_json(text: &str, sender: &Sender<MediaEvent>) -> Option<String> 
                 meta.status.as_deref() != Some("paused")
             });
 
+            let artist_for_lyrics = artist.clone();
             let notif = Notification {
                 app_name: "YouTube Music".to_string(),
                 title: title.clone(),
                 body: if !artist.is_empty() { artist } else if !album.is_empty() { album } else { "YouTube Music".to_string() },
-                time_str: "♪".to_string(),
-                badge_letter: "▶".to_string(),
+                time_str: "now".to_string(),
+                badge_letter: "M".to_string(),
                 badge_color: (0.95, 0.10, 0.10),
                 icon_bytes: None,
                 aumid: None,
@@ -353,6 +355,13 @@ fn handle_ytmpx_json(text: &str, sender: &Sender<MediaEvent>) -> Option<String> 
                 duration_secs,
             });
             let _ = sender.send(MediaEvent::PlaybackState(is_playing));
+
+            crate::lyrics::fetch_lyrics_async(
+                title.clone(),
+                artist_for_lyrics,
+                duration_secs,
+                sender.clone(),
+            );
 
             if !art_url.is_empty() {
                 return Some(art_url);
@@ -571,6 +580,8 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
                         last_is_playing = false;
                         let _ = sender.send(MediaEvent::PlaybackState(false));
                     }
+                    last_title.clear();
+                    last_artist.clear();
                     continue;
                 }
             };
@@ -661,9 +672,8 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
 
                         if !title.is_empty() {
                             let track_changed = title != last_title || artist != last_artist;
-                            let play_resumed = is_playing && state_changed;
 
-                            if track_changed || play_resumed {
+                            if track_changed {
                                 last_title = title.clone();
                                 last_artist = artist.clone();
 
@@ -684,8 +694,8 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
                                     } else {
                                         artist.clone()
                                     },
-                                    time_str: "♪".to_string(),
-                                    badge_letter: "▶".to_string(),
+                                    time_str: "now".to_string(),
+                                    badge_letter: "M".to_string(),
                                     badge_color,
                                     icon_bytes: None,
                                     aumid: None,

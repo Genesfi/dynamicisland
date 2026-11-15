@@ -3,13 +3,17 @@
 
 mod animation;
 mod audio_meter;
+mod battery;
 mod config;
+mod hydration;
 mod icons;
 mod island;
+mod lyrics;
 mod media;
 mod notifications;
 mod renderer;
 mod settings_window;
+mod transliterate;
 mod tray;
 
 use config::AppConfig;
@@ -23,7 +27,7 @@ use tray::{
 };
 
 use std::sync::mpsc::Receiver;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use windows::{
     core::*,
@@ -67,10 +71,14 @@ struct AppState {
     idle_settled_timer: f32,
     last_rgn_rect: (i32, i32, i32, i32),
     notif_receiver: Receiver<Notification>,
+    media_sender: std::sync::mpsc::Sender<MediaEvent>,
     media_receiver: Receiver<MediaEvent>,
     dragging_seek: bool,
     dragging_volume: bool,
     seek_grace_until: Option<Instant>,
+    media_pause_until: Option<Instant>,
+    lyrics_retry_count: u32,
+    lyrics_retry_at: Option<Instant>,
 }
 
 /// Dynamically syncs the OS window clipping region (GDI HRGN) to the exact pill capsule geometry.
@@ -165,11 +173,25 @@ fn is_foreground_fullscreen(fg: HWND, screen_w: i32, screen_h: i32) -> bool {
     }
 }
 
-/// Automatically nudges the island down when active foreground app is a browser with top tabs.
+/// Automatically nudges the island down when active foreground app is a browser with top tabs,
+/// or when FocusGrow Health HUD (F:\Android Project\focusgrow-rs) is actively showing.
 fn update_smart_contour(state: &mut AppState, fg: HWND, hwnd: HWND) {
     if !state.config.smart_contour {
         state.island.y_spring.set_target(state.config.top_margin);
         return;
+    }
+
+    unsafe {
+        // 1. FocusGrow Health HUD detection:
+        // FocusGrow (F:\Android Project\focusgrow-rs) creates a top-center posture HUD at Y = 12px with HWND_TOPMOST.
+        // If FocusGrow HUD is currently visible, smoothly nudge Dynamic Island down to Y = 54px so it rests cleanly underneath!
+        let fg_hud = FindWindowW(w!("FocusGrowHealthHud"), None).ok();
+        if let Some(hud) = fg_hud {
+            if !hud.0.is_null() && IsWindowVisible(hud).as_bool() {
+                state.island.y_spring.set_target(54.0 + state.config.top_margin);
+                return;
+            }
+        }
     }
 
     if fg.0.is_null() || fg == hwnd {
@@ -263,71 +285,258 @@ unsafe extern "system" fn wndproc(
                     let cy = (top + bottom) * 0.5;
 
                     if state.island.mode == island::IslandMode::FullCard {
-                        // 1. Toggle view chevron at top right (generous click zone)
-                        let chevron_x = right - 24.0;
-                        let chevron_y = top + 22.0;
+                        let cx = (left + right) * 0.5;
+
+                        // 1. Toggle view chevron at top right
+                        let chevron_x = right - 22.0;
+                        let chevron_y = top + 18.0;
                         let dist_chevron = ((mouse_x - chevron_x).powi(2) + (mouse_y - chevron_y).powi(2)).sqrt();
-                        if dist_chevron <= 24.0 || (mouse_x >= right - 42.0 && mouse_y <= top + 36.0) {
+                        if dist_chevron <= 22.0 || (mouse_x >= right - 38.0 && mouse_y <= top + 34.0) {
                             state.island.toggle_full_card();
                             state.island.remaining_time = 4.0;
                             return LRESULT(0);
                         }
 
-                        // 2. Playback Seek Bar (top + 76.0, left + 58.0 .. right - 58.0)
-                        let seek_y = top + 76.0;
-                        let seek_left = left + 58.0;
-                        let seek_right = right - 58.0;
-                        if mouse_y >= seek_y - 12.0 && mouse_y <= seek_y + 12.0 && mouse_x >= seek_left && mouse_x <= seek_right {
-                            state.dragging_seek = true;
-                            let ratio = ((mouse_x - seek_left) / (seek_right - seek_left)).clamp(0.0, 1.0);
-                            if let Some(ref mut track) = state.island.current_track {
-                                let target = ratio * track.duration_secs;
-                                track.position_secs = target;
+                        // 2. Navigation Chevrons [ < ] on Left Flank and [ > ] on Right Flank
+                        let chev_y = (top + bottom) * 0.5;
+                        let left_chev_x = left + 18.0;
+                        let dist_l = ((mouse_x - left_chev_x).powi(2) + (mouse_y - chev_y).powi(2)).sqrt();
+                        if dist_l <= 20.0 || (mouse_x >= left && mouse_x <= left + 36.0 && mouse_y >= chev_y - 24.0 && mouse_y <= chev_y + 24.0) {
+                            state.island.prev_card();
+                            state.island.remaining_time = 8.0;
+                            return LRESULT(0);
+                        }
+
+                        let right_chev_x = right - 18.0;
+                        let dist_r = ((mouse_x - right_chev_x).powi(2) + (mouse_y - chev_y).powi(2)).sqrt();
+                        if dist_r <= 20.0 || (mouse_x >= right - 36.0 && mouse_x <= right && mouse_y >= chev_y - 24.0 && mouse_y <= chev_y + 24.0) {
+                            state.island.next_card();
+                            state.island.remaining_time = 8.0;
+                            return LRESULT(0);
+                        }
+
+                        // 3. Bottom Pagination Dots:
+                        if mouse_y >= bottom - 22.0 && mouse_y <= bottom {
+                            let count = crate::island::SHELF_CARD_COUNT;
+                            let spacing = 13.0;
+                            let total_w = (count as f32 - 1.0) * spacing;
+                            let start_x = cx - total_w * 0.5;
+                            for i in 0..count {
+                                let item_cx = start_x + (i as f32) * spacing;
+                                if (mouse_x - item_cx).abs() <= 8.0 {
+                                    state.island.select_card(i);
+                                    return LRESULT(0);
+                                }
                             }
-                            state.island.remaining_time = 5.0;
-                            let _ = SetCapture(hwnd);
-                            return LRESULT(0);
                         }
 
-                        // 3. Volume Slider (top + 106.0, right - 76.0 .. right - 18.0)
-                        let vol_y = top + 106.0;
-                        let vol_left = right - 76.0;
-                        let vol_right = right - 18.0;
-                        if mouse_y >= vol_y - 12.0 && mouse_y <= vol_y + 12.0 && mouse_x >= vol_left && mouse_x <= vol_right {
-                            state.dragging_volume = true;
-                            let ratio = ((mouse_x - vol_left) / (vol_right - vol_left)).clamp(0.0, 1.0);
-                            state.island.volume = ratio;
-                            state.audio_meter.set_volume(ratio);
-                            state.island.remaining_time = 5.0;
-                            let _ = SetCapture(hwnd);
-                            return LRESULT(0);
-                        }
+                        // 4. Card-specific hit testing for Music & Lyrics (card index 2)
+                        if state.island.current_card == 2 {
+                            let top_c = top + 26.0;
+                            let col_l = left + 44.0;
+                            let right_c = right - 44.0;
 
-                        // 4. Media Controls in FullCard
-                        let ctrl_y = top + 106.0;
-                        let cx = (left + right) * 0.5;
-                        let dist_prev = ((mouse_x - (cx - 38.0)).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
-                        let dist_play = ((mouse_x - cx).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
-                        let dist_next = ((mouse_x - (cx + 38.0)).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
+                            if !state.island.show_lyrics {
+                                // Full-Width Player Mode
+                                let seek_y = top_c + 49.0;
+                                let seek_left = col_l + 42.0;
+                                let seek_right = right_c - 46.0;
 
-                        if dist_prev <= 18.0 {
-                            crate::media::send_media_command(crate::media::MediaCommand::Previous);
-                            state.island.remaining_time = 4.0;
-                            return LRESULT(0);
-                        } else if dist_play <= 20.0 {
-                            crate::media::send_media_command(crate::media::MediaCommand::TogglePlayPause);
-                            state.island.remaining_time = 4.0;
-                            return LRESULT(0);
-                        } else if dist_next <= 18.0 {
-                            crate::media::send_media_command(crate::media::MediaCommand::Next);
-                            state.island.remaining_time = 4.0;
-                            return LRESULT(0);
-                        }
+                                // Seek bar hit test
+                                if mouse_y >= seek_y - 10.0 && mouse_y <= seek_y + 10.0 && mouse_x >= seek_left && mouse_x <= seek_right {
+                                    state.dragging_seek = true;
+                                    let ratio = ((mouse_x - seek_left) / (seek_right - seek_left)).clamp(0.0, 1.0);
+                                    if let Some(ref mut track) = state.island.current_track {
+                                        let target = ratio * track.duration_secs;
+                                        track.position_secs = target;
+                                    }
+                                    state.island.remaining_time = 8.0;
+                                    let _ = SetCapture(hwnd);
+                                    return LRESULT(0);
+                                }
 
-                        // Clicked album art or header: toggle focus player
-                        if mouse_x <= left + 70.0 && mouse_y <= top + 70.0 {
-                            crate::media::activate_or_toggle_media_player(state.island.current_track.as_ref());
-                            return LRESULT(0);
+                                let ctrl_y = top_c + 78.0;
+
+                                // Speech bubble lyrics toggle button [💬] at col_l + 10.0, ctrl_y
+                                let dist_speech = ((mouse_x - (col_l + 10.0)).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
+                                if dist_speech <= 18.0 || (mouse_x >= col_l - 4.0 && mouse_x <= col_l + 24.0 && mouse_y >= ctrl_y - 14.0 && mouse_y <= ctrl_y + 14.0) {
+                                    state.island.show_lyrics = true;
+                                    state.island.remaining_time = 8.0;
+                                    let needs_fetch = state.island.current_lyrics.as_ref()
+                                        .map(|l| l.lines.is_empty() && !l.is_instrumental)
+                                        .unwrap_or(true);
+                                    if needs_fetch && !state.island.lyrics_loading {
+                                        if let Some(ref track) = state.island.current_track {
+                                            state.island.lyrics_loading = true;
+                                            state.lyrics_retry_count = 0;
+                                            crate::lyrics::fetch_lyrics_async(
+                                                track.title.clone(),
+                                                track.artist.clone(),
+                                                track.duration_secs,
+                                                state.media_sender.clone(),
+                                            );
+                                        }
+                                    }
+                                    return LRESULT(0);
+                                }
+
+                                // Volume slider on right (right_c - 94.0 .. right_c - 10.0)
+                                let vol_left = right_c - 94.0;
+                                let vol_right = right_c - 10.0;
+                                if mouse_y >= ctrl_y - 12.0 && mouse_y <= ctrl_y + 12.0 && mouse_x >= vol_left && mouse_x <= vol_right {
+                                    state.dragging_volume = true;
+                                    let ratio = ((mouse_x - vol_left) / (vol_right - vol_left)).clamp(0.0, 1.0);
+                                    state.island.volume = ratio;
+                                    state.audio_meter.set_volume(ratio);
+                                    state.island.remaining_time = 8.0;
+                                    let _ = SetCapture(hwnd);
+                                    return LRESULT(0);
+                                }
+
+                                // Transport buttons in center
+                                let prev_cx = cx - 44.0;
+                                let play_cx = cx;
+                                let next_cx = cx + 44.0;
+
+                                let dist_prev = ((mouse_x - prev_cx).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
+                                let dist_play = ((mouse_x - play_cx).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
+                                let dist_next = ((mouse_x - next_cx).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
+
+                                if dist_prev <= 18.0 {
+                                    crate::media::send_media_command(crate::media::MediaCommand::Previous);
+                                    state.island.remaining_time = 6.0;
+                                    return LRESULT(0);
+                                } else if dist_play <= 20.0 {
+                                    crate::media::send_media_command(crate::media::MediaCommand::TogglePlayPause);
+                                    state.island.remaining_time = 6.0;
+                                    return LRESULT(0);
+                                } else if dist_next <= 18.0 {
+                                    crate::media::send_media_command(crate::media::MediaCommand::Next);
+                                    state.island.remaining_time = 6.0;
+                                    return LRESULT(0);
+                                }
+
+                                // Click album art / title: focus music player
+                                if mouse_x >= col_l && mouse_x <= col_l + 48.0 && mouse_y >= top_c && mouse_y <= top_c + 50.0 {
+                                    crate::media::activate_or_toggle_media_player(state.island.current_track.as_ref());
+                                    return LRESULT(0);
+                                }
+                            } else {
+                                // Two-Column Lyrics Split Mode
+                                let col_r = cx + 12.0;
+
+                                // Seek bar in left column
+                                let seek_y = top_c + 46.0;
+                                let seek_left = col_l + 38.0;
+                                let seek_right = cx - 42.0;
+                                if mouse_y >= seek_y - 10.0 && mouse_y <= seek_y + 10.0 && mouse_x >= seek_left && mouse_x <= seek_right {
+                                    state.dragging_seek = true;
+                                    let ratio = ((mouse_x - seek_left) / (seek_right - seek_left)).clamp(0.0, 1.0);
+                                    if let Some(ref mut track) = state.island.current_track {
+                                        let target = ratio * track.duration_secs;
+                                        track.position_secs = target;
+                                    }
+                                    state.island.remaining_time = 8.0;
+                                    let _ = SetCapture(hwnd);
+                                    return LRESULT(0);
+                                }
+
+                                // Volume slider on right column
+                                let vol_y = top_c + 75.0;
+                                let vol_left = col_r + 18.0;
+                                let vol_right = right_c - 10.0;
+                                if mouse_y >= vol_y - 10.0 && mouse_y <= vol_y + 10.0 && mouse_x >= vol_left && mouse_x <= vol_right {
+                                    state.dragging_volume = true;
+                                    let ratio = ((mouse_x - vol_left) / (vol_right - vol_left)).clamp(0.0, 1.0);
+                                    state.island.volume = ratio;
+                                    state.audio_meter.set_volume(ratio);
+                                    state.island.remaining_time = 8.0;
+                                    let _ = SetCapture(hwnd);
+                                    return LRESULT(0);
+                                }
+
+                                let ctrl_y = top_c + 75.0;
+
+                                // Speech bubble lyrics toggle button [💬] at col_l + 8.0: toggles back to full-width!
+                                let dist_speech = ((mouse_x - (col_l + 8.0)).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
+                                if dist_speech <= 18.0 || (mouse_x >= col_l - 4.0 && mouse_x <= col_l + 20.0 && mouse_y >= ctrl_y - 14.0 && mouse_y <= ctrl_y + 14.0) {
+                                    state.island.show_lyrics = false;
+                                    state.island.remaining_time = 8.0;
+                                    return LRESULT(0);
+                                }
+
+                                // Transport buttons in left column
+                                let btn_cx = (col_l + 24.0 + cx - 10.0) * 0.5;
+                                let prev_cx = btn_cx - 28.0;
+                                let play_cx = btn_cx;
+                                let next_cx = btn_cx + 28.0;
+
+                                let dist_prev = ((mouse_x - prev_cx).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
+                                let dist_play = ((mouse_x - play_cx).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
+                                let dist_next = ((mouse_x - next_cx).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
+
+                                if dist_prev <= 16.0 {
+                                    crate::media::send_media_command(crate::media::MediaCommand::Previous);
+                                    state.island.remaining_time = 6.0;
+                                    return LRESULT(0);
+                                } else if dist_play <= 18.0 {
+                                    crate::media::send_media_command(crate::media::MediaCommand::TogglePlayPause);
+                                    state.island.remaining_time = 6.0;
+                                    return LRESULT(0);
+                                } else if dist_next <= 16.0 {
+                                    crate::media::send_media_command(crate::media::MediaCommand::Next);
+                                    state.island.remaining_time = 6.0;
+                                    return LRESULT(0);
+                                }
+
+                                // Click in right column lyrics area: if lyrics are missing, trigger instant retry!
+                                if mouse_x >= cx + 12.0 && mouse_x <= right_c && mouse_y >= top_c + 12.0 && mouse_y <= top_c + 75.0 {
+                                    let needs_fetch = state.island.current_lyrics.as_ref()
+                                        .map(|l| l.lines.is_empty() && !l.is_instrumental)
+                                        .unwrap_or(true);
+                                    if needs_fetch && !state.island.lyrics_loading {
+                                        if let Some(ref track) = state.island.current_track {
+                                            state.island.lyrics_loading = true;
+                                            state.lyrics_retry_count = 0;
+                                            crate::lyrics::fetch_lyrics_async(
+                                                track.title.clone(),
+                                                track.artist.clone(),
+                                                track.duration_secs,
+                                                state.media_sender.clone(),
+                                            );
+                                        }
+                                    }
+                                    return LRESULT(0);
+                                }
+                            }
+                        } else if state.island.current_card == 4 {
+                            // Card 4: Water Reminder / Hydration Tracker
+                            let top_c = top + 26.0;
+                            let col_l = left + 44.0;
+                            let col_r = cx + 12.0;
+                            let right_c = right - 44.0;
+                            let gauge_cx = (col_r + right_c) * 0.5;
+
+                            // 1. [+250 ml] Button: col_l .. col_l + 78.0, top_c + 56.0 .. top_c + 78.0
+                            if mouse_x >= col_l && mouse_x <= col_l + 78.0 && mouse_y >= top_c + 56.0 && mouse_y <= top_c + 78.0 {
+                                state.island.hydration.drink(250);
+                                state.island.remaining_time = 8.0;
+                                return LRESULT(0);
+                            }
+
+                            // 2. [Target] Button: col_l + 84.0 .. col_l + 146.0, top_c + 56.0 .. top_c + 78.0
+                            if mouse_x >= col_l + 84.0 && mouse_x <= col_l + 146.0 && mouse_y >= top_c + 56.0 && mouse_y <= top_c + 78.0 {
+                                state.island.hydration.cycle_target();
+                                state.island.remaining_time = 8.0;
+                                return LRESULT(0);
+                            }
+
+                            // 3. [Reminder Bell]: gauge_cx - 65.0 .. gauge_cx + 70.0, top_c + 66.0 .. top_c + 84.0
+                            if mouse_x >= gauge_cx - 65.0 && mouse_x <= gauge_cx + 70.0 && mouse_y >= top_c + 66.0 && mouse_y <= top_c + 84.0 {
+                                state.island.hydration.toggle_reminder();
+                                state.island.remaining_time = 8.0;
+                                return LRESULT(0);
+                            }
                         }
                     } else if state.island.mode == island::IslandMode::Expanded {
                         let prev_cx = right - 124.0;
@@ -372,21 +581,29 @@ unsafe extern "system" fn wndproc(
                     let (left, _top, right, _bottom) = state.island.get_pill_rect();
 
                     if state.dragging_seek {
-                        let seek_left = left + 58.0;
-                        let seek_right = right - 58.0;
+                        let (seek_left, seek_right) = if state.island.mode == island::IslandMode::FullCard && !state.island.show_lyrics {
+                            (left + 44.0 + 42.0, right - 44.0 - 46.0)
+                        } else {
+                            let cx = (left + right) * 0.5;
+                            (left + 44.0 + 38.0, cx - 42.0)
+                        };
                         let ratio = ((mouse_x - seek_left) / (seek_right - seek_left)).clamp(0.0, 1.0);
                         if let Some(ref mut track) = state.island.current_track {
                             let target = ratio * track.duration_secs;
                             track.position_secs = target;
                         }
-                        state.island.remaining_time = 5.0;
+                        state.island.remaining_time = 8.0;
                     } else if state.dragging_volume {
-                        let vol_left = right - 76.0;
-                        let vol_right = right - 18.0;
+                        let (vol_left, vol_right) = if state.island.mode == island::IslandMode::FullCard && !state.island.show_lyrics {
+                            (right - 44.0 - 94.0, right - 44.0 - 10.0)
+                        } else {
+                            let cx = (left + right) * 0.5;
+                            (cx + 12.0 + 18.0, right - 44.0 - 10.0)
+                        };
                         let ratio = ((mouse_x - vol_left) / (vol_right - vol_left)).clamp(0.0, 1.0);
                         state.island.volume = ratio;
                         state.audio_meter.set_volume(ratio);
-                        state.island.remaining_time = 5.0;
+                        state.island.remaining_time = 8.0;
                     }
 
                     if !state.is_tracking_mouse {
@@ -437,10 +654,7 @@ unsafe extern "system" fn wndproc(
                     let cy = (top + bottom) * 0.5;
 
                     if state.island.mode == island::IslandMode::FullCard {
-                        let dist_chevron = ((mouse_x - (right - 24.0)).powi(2) + (mouse_y - (top + 22.0)).powi(2)).sqrt();
-                        if dist_chevron <= 24.0 || (mouse_x >= right - 42.0 && mouse_y <= top + 36.0) {
-                            return LRESULT(0);
-                        }
+                        return LRESULT(0);
                     } else if state.island.mode == island::IslandMode::Expanded {
                         let prev_cx = right - 124.0;
                         let play_cx = right - 88.0;
@@ -458,7 +672,7 @@ unsafe extern "system" fn wndproc(
                         }
 
                         // If expanded with media, check playback control buttons
-                        if state.island.current_track.is_some() || state.island.is_media_playing {
+                        if state.island.active_notification.is_none() && (state.island.current_track.is_some() || state.island.is_media_playing) {
                             // Clicked anywhere else on the expanded pill (album art, title, pill surface):
                             // Focus or toggle YouTube Music / Spotify / Browser tab like focusgrow-rs!
                             crate::media::activate_or_toggle_media_player(state.island.current_track.as_ref());
@@ -469,13 +683,36 @@ unsafe extern "system" fn wndproc(
                         // Otherwise clicking on the island dismisses it
                         state.island.dismiss();
                     } else if state.island.mode == island::IslandMode::Idle || state.island.mode == island::IslandMode::Slim {
-                        if state.island.is_media_playing || state.island.current_track.is_some() {
+                        if state.island.mode == island::IslandMode::Slim && state.island.active_notification.is_some() {
+                            // Clicked notification banner: dismiss immediately!
+                            state.island.dismiss();
+                            return LRESULT(0);
+                        } else if state.island.is_media_playing || state.island.current_track.is_some() {
                             // Clicked compact/slim media pill: open/focus YouTube Music / Spotify / Browser tab!
                             crate::media::activate_or_toggle_media_player(state.island.current_track.as_ref());
+                        } else if !state.config.idle_click_through {
+                            // Clicked idle clock pill: expand full shelf!
+                            state.island.expand_full_card();
                         }
                     }
                 }
                 LRESULT(0)
+            }
+            WM_MOUSEWHEEL => {
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
+                if !state_ptr.is_null() {
+                    let state = &mut *state_ptr;
+                    if state.island.mode == island::IslandMode::FullCard {
+                        let delta = ((wparam.0 >> 16) & 0xFFFF) as i16;
+                        if delta < 0 {
+                            state.island.next_card();
+                        } else if delta > 0 {
+                            state.island.prev_card();
+                        }
+                        return LRESULT(0);
+                    }
+                }
+                DefWindowProcW(hwnd, msg, wparam, lparam)
             }
             WM_KEYDOWN => {
                 let key = wparam.0 as u32;
@@ -515,8 +752,15 @@ unsafe extern "system" fn wndproc(
                     state.island.vinyl_speed = state.config.vinyl_speed;
                     state.island.compact_mode_view = state.config.compact_mode_view;
                     state.island.compact_music_width = state.config.compact_music_width;
+                    state.island.compact_lyrics_width = state.config.compact_lyrics_width;
+                    state.island.show_lyrics_in_capsule = state.config.show_lyrics_in_capsule;
                     state.island.use_full_media_card = state.config.use_full_media_card;
-                    if state.island.mode == island::IslandMode::Expanded {
+                    state.island.romanize_cjk_lyrics = state.config.romanize_cjk_lyrics;
+
+                    if state.island.mode == island::IslandMode::Idle {
+                        let target_w = state.island.target_idle_width();
+                        state.island.width_spring.set_target(target_w);
+                    } else if state.island.mode == island::IslandMode::Expanded {
                         let (target_w, target_h, target_r) = state.island.island_style.dimensions();
                         state.island.width_spring.set_target(target_w);
                         state.island.height_spring.set_target(target_h);
@@ -526,6 +770,13 @@ unsafe extern "system" fn wndproc(
                         state.island.height_spring.set_target(island::FULL_CARD_HEIGHT);
                         state.island.radius_spring.set_target(island::FULL_CARD_RADIUS);
                     }
+
+                    // Immediately re-evaluate contour and vertical positioning for live top_margin updates!
+                    let fg = GetForegroundWindow();
+                    update_smart_contour(state, fg, hwnd);
+
+                    // Re-sync window region clipping and render frame immediately
+                    sync_window_region(hwnd, state);
                     let _ = state.renderer.render(&state.island, &state.config);
                 }
                 LRESULT(0)
@@ -551,8 +802,13 @@ unsafe extern "system" fn wndproc(
 
                     // 1. Process real incoming Windows notifications from listener
                     while let Ok(live_notif) = state.notif_receiver.try_recv() {
-                        state.island.show_notification(live_notif);
-                        state.island.remaining_time = state.config.auto_collapse_secs;
+                        let is_media = live_notif.app_name.to_lowercase().contains("spotify")
+                            || live_notif.app_name.to_lowercase().contains("music")
+                            || live_notif.app_name.to_lowercase().contains("youtube");
+                        if !is_media {
+                            state.island.show_notification(live_notif);
+                            state.island.remaining_time = state.config.auto_collapse_secs;
+                        }
                     }
 
                     // 2. Process real media events if enabled in config
@@ -560,6 +816,8 @@ unsafe extern "system" fn wndproc(
                         if state.config.enable_media_island {
                             match media_event {
                                 MediaEvent::TrackChanged { notif, thumbnail_bytes, position_secs, duration_secs } => {
+                                    state.media_pause_until = None;
+
                                     let same_track = state.island.current_track.as_ref().map(|t| {
                                         t.title == notif.title && t.artist == notif.body
                                     }).unwrap_or(false);
@@ -572,13 +830,15 @@ unsafe extern "system" fn wndproc(
 
                                     let effective_thumb = thumbnail_bytes.or(prev_thumb);
 
+                                    let effective_pos = if same_track { position_secs } else { 0.0 };
+
                                     state.island.current_track = Some(crate::island::TrackInfo {
                                         title: notif.title.clone(),
                                         artist: notif.body.clone(),
                                         is_playing: true,
                                         thumbnail_bytes: effective_thumb.clone(),
                                         source: notif.app_name.clone(),
-                                        position_secs,
+                                        position_secs: effective_pos,
                                         duration_secs,
                                     });
                                     if let Some(ref bytes) = effective_thumb {
@@ -586,8 +846,28 @@ unsafe extern "system" fn wndproc(
                                     } else if !same_track {
                                         state.renderer.clear_album_art();
                                     }
-                                    state.island.show_notification(notif);
-                                    state.island.remaining_time = 4.0;
+
+                                    if !same_track {
+                                        state.island.current_lyrics = None;
+                                        state.island.lyrics_loading = true;
+                                        state.lyrics_retry_count = 0;
+                                        state.lyrics_retry_at = None;
+                                        crate::lyrics::fetch_lyrics_async(
+                                            notif.title.clone(),
+                                            notif.body.clone(),
+                                            duration_secs,
+                                            state.media_sender.clone(),
+                                        );
+                                    }
+
+                                    state.island.is_media_playing = true;
+                                    state.island.marquee_offset = 0.0;
+                                    state.island.active_notification = None;
+
+                                    if state.island.mode == island::IslandMode::Idle {
+                                        let target_w = state.island.target_idle_width();
+                                        state.island.width_spring.set_target(target_w);
+                                    }
                                 }
                                 MediaEvent::ThumbnailLoaded(bytes) => {
                                     if let Some(ref mut track) = state.island.current_track {
@@ -596,12 +876,31 @@ unsafe extern "system" fn wndproc(
                                     state.renderer.set_album_art(&bytes, state.config.dynamic_album_color);
                                 }
                                 MediaEvent::PlaybackState(is_playing) => {
-                                    state.island.is_media_playing = is_playing;
-                                    if let Some(ref mut track) = state.island.current_track {
-                                        track.is_playing = is_playing;
-                                    }
-                                    if is_playing && state.island.mode == island::IslandMode::Idle {
-                                        state.island.expand_media();
+                                    if is_playing {
+                                        state.media_pause_until = None;
+                                        state.island.is_media_playing = true;
+                                        if let Some(ref mut track) = state.island.current_track {
+                                            track.is_playing = true;
+                                        }
+                                        if state.island.mode == island::IslandMode::Idle {
+                                            let target_w = state.island.target_idle_width();
+                                            state.island.width_spring.set_target(target_w);
+                                        }
+                                    } else {
+                                        // Playback paused or buffering during track transition
+                                        if let Some(ref mut track) = state.island.current_track {
+                                            track.is_playing = false;
+                                            // 2500ms debounce grace period: do NOT collapse to clock immediately!
+                                            // Completely eliminates the 2x clock-music oscillation during track skips and buffering.
+                                            state.media_pause_until = Some(Instant::now() + Duration::from_millis(2500));
+                                        } else {
+                                            state.media_pause_until = None;
+                                            state.island.is_media_playing = false;
+                                            if state.island.mode == island::IslandMode::Idle {
+                                                let target_w = state.island.target_idle_width();
+                                                state.island.width_spring.set_target(target_w);
+                                            }
+                                        }
                                     }
                                 }
                                 MediaEvent::TimelineUpdate { position_secs, duration_secs } => {
@@ -612,7 +911,11 @@ unsafe extern "system" fn wndproc(
                                         if !state.dragging_seek && !in_grace {
                                             let drift = (track.position_secs - position_secs).abs();
                                             if drift > 1.2 {
+                                                // Large jump: User seeked in external music player
                                                 track.position_secs = position_secs;
+                                            } else if drift > 0.08 {
+                                                // Gentle micro-adjustment towards true timeline (avoids karaoke jerking)
+                                                track.position_secs += (position_secs - track.position_secs) * 0.20;
                                             }
                                         }
                                         if duration_secs > 0.0 {
@@ -620,9 +923,74 @@ unsafe extern "system" fn wndproc(
                                         }
                                     }
                                 }
+                                MediaEvent::LyricsLoaded(lyrics) => {
+                                    // Ensure lyrics match currently playing track to avoid slow-worker race conditions
+                                    let belongs = if let Some(ref track) = state.island.current_track {
+                                        lyrics.title.is_empty()
+                                            || lyrics.title.eq_ignore_ascii_case(&track.title)
+                                            || track.title.to_lowercase().contains(&lyrics.title.to_lowercase())
+                                            || lyrics.title.to_lowercase().contains(&track.title.to_lowercase())
+                                    } else {
+                                        true
+                                    };
+
+                                    if belongs {
+                                        if !lyrics.lines.is_empty() || lyrics.is_instrumental {
+                                            state.island.current_lyrics = Some(lyrics);
+                                            state.island.lyrics_loading = false;
+                                        } else {
+                                            // Empty result: schedule automatic retry after 3.5s if attempts remain
+                                            state.island.current_lyrics = Some(lyrics);
+                                            state.island.lyrics_loading = false;
+                                            if state.lyrics_retry_count < 2 {
+                                                state.lyrics_retry_at = Some(Instant::now() + Duration::from_millis(3500));
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         } else {
+                            state.media_pause_until = None;
                             state.island.is_media_playing = false;
+                        }
+                    }
+
+                    // Check media pause debounce grace period
+                    if let Some(pause_until) = state.media_pause_until {
+                        if Instant::now() >= pause_until {
+                            state.media_pause_until = None;
+                            state.island.is_media_playing = false;
+                            if state.island.mode == island::IslandMode::Idle {
+                                let target_w = state.island.target_idle_width();
+                                state.island.width_spring.set_target(target_w);
+                            }
+                        }
+                    }
+
+                    // Auto-retry lyrics search if initial lookup was empty or network timed out
+                    if state.island.is_media_playing
+                        && !state.island.lyrics_loading
+                        && state.lyrics_retry_count < 2
+                    {
+                        let has_lyrics = state.island.current_lyrics.as_ref()
+                            .map(|l| !l.lines.is_empty() || l.is_instrumental)
+                            .unwrap_or(false);
+                        if !has_lyrics {
+                            if let Some(retry_at) = state.lyrics_retry_at {
+                                if Instant::now() >= retry_at {
+                                    state.lyrics_retry_count += 1;
+                                    state.lyrics_retry_at = None;
+                                    state.island.lyrics_loading = true;
+                                    if let Some(ref track) = state.island.current_track {
+                                        crate::lyrics::fetch_lyrics_async(
+                                            track.title.clone(),
+                                            track.artist.clone(),
+                                            track.duration_secs,
+                                            state.media_sender.clone(),
+                                        );
+                                    }
+                                }
+                            }
                         }
                     }
 
@@ -647,6 +1015,7 @@ unsafe extern "system" fn wndproc(
                         state.island.alpha_spring.set_target(0.0);
                         state.island.y_spring.set_target(-100.0);
                         state.island.update(dt);
+                        state.island.hydration.update(dt);
                         sync_window_region(hwnd, state);
                         let _ = state.renderer.render(&state.island, &state.config);
                         return LRESULT(0);
@@ -696,27 +1065,31 @@ unsafe extern "system" fn wndproc(
                         }
                     }
 
-                    // Auto-rehydrate album art if current track has thumbnail bytes but renderer bitmap is empty
-                    if state.renderer.album_art.is_none() {
-                        if let Some(ref track) = state.island.current_track {
-                            if let Some(ref bytes) = track.thumbnail_bytes {
-                                state.renderer.set_album_art(bytes, state.config.dynamic_album_color);
-                            }
+                    state.island.update(dt);
+                    state.island.hydration.update(dt);
+
+                    if state.island.hydration.trigger_alert {
+                        state.island.hydration.trigger_alert = false;
+                        if state.island.mode == island::IslandMode::Idle {
+                            let notif = Notification {
+                                app_name: "Hydration".to_string(),
+                                title: "Time to Drink Water".to_string(),
+                                body: "Take a sip to stay fresh & focused!".to_string(),
+                                time_str: "now".to_string(),
+                                badge_letter: "H".to_string(),
+                                badge_color: (0.25, 0.78, 0.98),
+                                icon_bytes: None,
+                                aumid: None,
+                            };
+                            state.island.show_notification(notif);
                         }
                     }
 
-                    state.island.update(dt);
-
-                    // Automatic Working Set Trimming when settled in idle:
-                    let is_active = state.island.mode != island::IslandMode::Idle || state.island.is_media_playing;
-                    if is_active {
+                    // Periodic Working Set Trimming every 12 seconds to keep RAM strictly low (15-20 MB):
+                    state.idle_settled_timer += dt;
+                    if state.idle_settled_timer >= 12.0 {
                         state.idle_settled_timer = 0.0;
-                    } else {
-                        state.idle_settled_timer += dt;
-                        // Once settled in idle for 3 seconds, perform a gentle working set trim
-                        if state.idle_settled_timer >= 3.0 && state.idle_settled_timer < 3.0 + dt * 1.5 {
-                            trim_working_set();
-                        }
+                        trim_working_set();
                     }
 
                     sync_window_region(hwnd, state);
@@ -762,6 +1135,12 @@ fn main() {
 
 fn run_app() -> Result<()> {
     unsafe {
+        // Ensure working directory is always the executable's folder, even when started by Windows Autostart!
+        if let Ok(mut exe_dir) = std::env::current_exe() {
+            exe_dir.pop();
+            let _ = std::env::set_current_dir(&exe_dir);
+        }
+
         // 0. Single Instance Lock (strictly prevent running 2x!)
         let mutex_name = w!("Local\\DynamicIslandSingleInstanceMutex");
         let mutex = windows::Win32::System::Threading::CreateMutexW(None, true, mutex_name);
@@ -864,7 +1243,10 @@ fn run_app() -> Result<()> {
         island.vinyl_speed = config.vinyl_speed;
         island.compact_mode_view = config.compact_mode_view;
         island.compact_music_width = config.compact_music_width;
+        island.compact_lyrics_width = config.compact_lyrics_width;
+        island.show_lyrics_in_capsule = config.show_lyrics_in_capsule;
         island.use_full_media_card = config.use_full_media_card;
+        island.romanize_cjk_lyrics = config.romanize_cjk_lyrics;
 
         // 6. Spawn Live Windows Notification Listener
         let (notif_tx, notif_rx) = std::sync::mpsc::channel::<Notification>();
@@ -872,7 +1254,7 @@ fn run_app() -> Result<()> {
 
         // 7. Spawn Windows Media / Music Listener
         let (media_tx, media_rx) = std::sync::mpsc::channel::<MediaEvent>();
-        start_media_listener(media_tx);
+        start_media_listener(media_tx.clone());
 
         // 8. Register System Tray Icon
         let _ = add_tray_icon(hwnd);
@@ -892,10 +1274,14 @@ fn run_app() -> Result<()> {
             idle_settled_timer: 0.0,
             last_rgn_rect: (-1, -1, -1, -1),
             notif_receiver: notif_rx,
+            media_sender: media_tx,
             media_receiver: media_rx,
             dragging_seek: false,
             dragging_volume: false,
             seek_grace_until: None,
+            media_pause_until: None,
+            lyrics_retry_count: 0,
+            lyrics_retry_at: None,
         });
 
         // Store AppState pointer into window UserData

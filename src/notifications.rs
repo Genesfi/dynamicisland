@@ -86,9 +86,9 @@ pub fn get_app_badge_info(app_name: &str) -> (String, (f32, f32, f32)) {
     } else if lower.contains("discord") {
         ("D".to_string(), (0.35, 0.40, 0.95)) // Discord Blurple
     } else if lower.contains("spotify") {
-        ("♫".to_string(), (0.11, 0.73, 0.33)) // Spotify Green
+        ("S".to_string(), (0.11, 0.73, 0.33)) // Spotify Green
     } else if lower.contains("youtube") {
-        ("▶".to_string(), (0.95, 0.10, 0.10)) // YouTube Red
+        ("Y".to_string(), (0.95, 0.10, 0.10)) // YouTube Red
     } else if lower.contains("slack") {
         ("S".to_string(), (0.88, 0.15, 0.45)) // Slack Aubergine/Magenta
     } else if lower.contains("chrome") {
@@ -98,7 +98,7 @@ pub fn get_app_badge_info(app_name: &str) -> (String, (f32, f32, f32)) {
     } else if lower.contains("edge") {
         ("E".to_string(), (0.00, 0.48, 0.85)) // Edge Cobalt Blue
     } else if lower.contains("outlook") || lower.contains("mail") {
-        ("✉".to_string(), (0.00, 0.45, 0.85)) // Outlook Royal Blue
+        ("M".to_string(), (0.00, 0.45, 0.85)) // Outlook Royal Blue
     } else if lower.contains("github") {
         ("G".to_string(), (0.45, 0.20, 0.75)) // GitHub Purple
     } else if lower.contains("steam") {

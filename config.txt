@@ -1,14 +1,21 @@
 # Dynamic Island Settings
-top_margin=12
+top_margin=10
 auto_collapse_secs=5.5
 island_style=sleek
-island_opacity=0.76
-glow_intensity=0.81
+island_opacity=0.95
+glow_intensity=0.56
 vinyl_speed=0.50
 compact_mode_view=combined
+compact_music_width=245.0
+compact_lyrics_width=310.0
 dynamic_album_color=true
 enable_media_island=true
 enable_vinyl_animation=true
 hover_expand_media=true
 idle_click_through=true
+smart_contour=true
+contour_nudge_y=34.0
 start_with_windows=true
+use_full_media_card=false
+show_lyrics_in_capsule=true
+romanize_cjk_lyrics=false

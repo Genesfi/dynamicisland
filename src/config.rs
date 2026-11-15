@@ -1,10 +1,29 @@
 use std::fs;
-use std::path::Path;
+use std::path::PathBuf;
 
 use windows::{
     core::*,
     Win32::System::Registry::*,
 };
+
+pub fn get_config_path() -> PathBuf {
+    if let Ok(mut exe_path) = std::env::current_exe() {
+        exe_path.pop();
+        let exe_dir_cfg = exe_path.join("config.txt");
+        if exe_dir_cfg.exists() {
+            return exe_dir_cfg;
+        }
+        // If running inside target/debug or target/release, check root repo config.txt
+        let repo_cfg = exe_path.join("..").join("..").join("config.txt");
+        if repo_cfg.exists() {
+            if let Ok(canonical) = repo_cfg.canonicalize() {
+                return canonical;
+            }
+        }
+        return exe_dir_cfg;
+    }
+    PathBuf::from("config.txt")
+}
 
 pub fn is_autostart_enabled() -> bool {
     unsafe {
@@ -123,6 +142,7 @@ pub struct AppConfig {
     pub vinyl_speed: f32,
     pub compact_mode_view: CompactDisplayMode,
     pub compact_music_width: f32,
+    pub compact_lyrics_width: f32,
     pub dynamic_album_color: bool,
     pub enable_media_island: bool,
     pub enable_vinyl_animation: bool,
@@ -132,6 +152,8 @@ pub struct AppConfig {
     pub contour_nudge_y: f32,
     pub start_with_windows: bool,
     pub use_full_media_card: bool,
+    pub show_lyrics_in_capsule: bool,
+    pub romanize_cjk_lyrics: bool,
 }
 
 impl Default for AppConfig {
@@ -144,7 +166,8 @@ impl Default for AppConfig {
             glow_intensity: 0.60,
             vinyl_speed: 1.0,
             compact_mode_view: CompactDisplayMode::Combined,
-            compact_music_width: 260.0,
+            compact_music_width: 240.0,
+            compact_lyrics_width: 310.0,
             dynamic_album_color: true,
             enable_media_island: true,
             enable_vinyl_animation: true,
@@ -154,14 +177,16 @@ impl Default for AppConfig {
             contour_nudge_y: 34.0,
             start_with_windows: is_autostart_enabled(),
             use_full_media_card: false,
+            show_lyrics_in_capsule: true,
+            romanize_cjk_lyrics: false,
         }
     }
 }
 
 impl AppConfig {
     pub fn load() -> Self {
-        let path = Path::new("config.txt");
-        if let Ok(content) = fs::read_to_string(path) {
+        let path = get_config_path();
+        if let Ok(content) = fs::read_to_string(&path) {
             let mut cfg = Self::default();
             for line in content.lines() {
                 let parts: Vec<&str> = line.split('=').map(|s| s.trim()).collect();
@@ -212,6 +237,11 @@ impl AppConfig {
                                 cfg.compact_music_width = val.clamp(160.0, 450.0);
                             }
                         }
+                        "compact_lyrics_width" => {
+                            if let Ok(val) = parts[1].parse::<f32>() {
+                                cfg.compact_lyrics_width = val.clamp(180.0, 480.0);
+                            }
+                        }
                         "dynamic_album_color" => {
                             cfg.dynamic_album_color = parts[1] == "true" || parts[1] == "1";
                         }
@@ -240,6 +270,12 @@ impl AppConfig {
                         }
                         "use_full_media_card" => {
                             cfg.use_full_media_card = parts[1] == "true" || parts[1] == "1";
+                        }
+                        "show_lyrics_in_capsule" => {
+                            cfg.show_lyrics_in_capsule = parts[1] == "true" || parts[1] == "1";
+                        }
+                        "romanize_cjk_lyrics" => {
+                            cfg.romanize_cjk_lyrics = parts[1] == "true" || parts[1] == "1";
                         }
                         _ => {}
                     }
@@ -272,7 +308,7 @@ impl AppConfig {
         };
 
         let content = format!(
-            "# Dynamic Island Settings\ntop_margin={}\nauto_collapse_secs={}\nisland_style={}\nisland_opacity={:.2}\nglow_intensity={:.2}\nvinyl_speed={:.2}\ncompact_mode_view={}\ncompact_music_width={:.1}\ndynamic_album_color={}\nenable_media_island={}\nenable_vinyl_animation={}\nhover_expand_media={}\nidle_click_through={}\nsmart_contour={}\ncontour_nudge_y={:.1}\nstart_with_windows={}\nuse_full_media_card={}\n",
+            "# Dynamic Island Settings\ntop_margin={}\nauto_collapse_secs={}\nisland_style={}\nisland_opacity={:.2}\nglow_intensity={:.2}\nvinyl_speed={:.2}\ncompact_mode_view={}\ncompact_music_width={:.1}\ncompact_lyrics_width={:.1}\ndynamic_album_color={}\nenable_media_island={}\nenable_vinyl_animation={}\nhover_expand_media={}\nidle_click_through={}\nsmart_contour={}\ncontour_nudge_y={:.1}\nstart_with_windows={}\nuse_full_media_card={}\nshow_lyrics_in_capsule={}\nromanize_cjk_lyrics={}\n",
             self.top_margin,
             self.auto_collapse_secs,
             style_str,
@@ -281,6 +317,7 @@ impl AppConfig {
             self.vinyl_speed,
             view_str,
             self.compact_music_width,
+            self.compact_lyrics_width,
             self.dynamic_album_color,
             self.enable_media_island,
             self.enable_vinyl_animation,
@@ -289,8 +326,20 @@ impl AppConfig {
             self.smart_contour,
             self.contour_nudge_y,
             self.start_with_windows,
-            self.use_full_media_card
+            self.use_full_media_card,
+            self.show_lyrics_in_capsule,
+            self.romanize_cjk_lyrics
         );
-        let _ = fs::write("config.txt", content);
+        let path = get_config_path();
+        let _ = fs::write(&path, &content);
+
+        // Also sync to parent repo directory if in development (e.g. target/release -> root)
+        if let Ok(mut exe_path) = std::env::current_exe() {
+            exe_path.pop();
+            let repo_cfg = exe_path.join("..").join("..").join("config.txt");
+            if repo_cfg.exists() && repo_cfg != path {
+                let _ = fs::write(repo_cfg, &content);
+            }
+        }
     }
 }
