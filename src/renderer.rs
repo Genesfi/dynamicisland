@@ -64,6 +64,9 @@ pub struct Renderer {
 
     pub accent_color: (f32, f32, f32),
     pub album_art: Option<ID2D1Bitmap>,
+    pub brush_album_art: Option<ID2D1BitmapBrush1>,
+    pub cached_lyric_line: String,
+    pub cached_lyric_width: f32,
     pub last_cover_hash: u64,
     pub wic_factory: IWICImagingFactory,
     #[allow(dead_code)]
@@ -295,10 +298,10 @@ impl Renderer {
             let format_lyrics = dwrite_factory.CreateTextFormat(
                 w!("Segoe UI Variable Display"),
                 None,
-                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_WEIGHT_BOLD,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                13.0,
+                14.5,
                 w!("en-us"),
             )?;
             format_lyrics.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
@@ -310,11 +313,11 @@ impl Renderer {
                 DWRITE_FONT_WEIGHT_NORMAL,
                 DWRITE_FONT_STYLE_NORMAL,
                 DWRITE_FONT_STRETCH_NORMAL,
-                11.0,
+                11.5,
                 w!("en-us"),
             )?;
             format_lyrics_sub.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR)?;
-            format_lyrics_sub.SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP)?;
+            format_lyrics_sub.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
 
             // 7. Solid Brushes
             let brush_bg = d2d_context.CreateSolidColorBrush(
@@ -410,6 +413,9 @@ impl Renderer {
                 brush_accent,
                 accent_color: (0.20, 0.75, 1.0),
                 album_art: None,
+                brush_album_art: None,
+                cached_lyric_line: String::new(),
+                cached_lyric_width: 0.0,
                 last_cover_hash: 0,
                 icon_manager: crate::icons::IconManager::new(wic_factory.clone()),
                 wic_factory,
@@ -421,6 +427,7 @@ impl Renderer {
 
     pub fn clear_album_art(&mut self) {
         self.album_art = None;
+        self.brush_album_art = None;
         self.last_cover_hash = 0;
         self.accent_color = (0.20, 0.75, 1.0);
         unsafe {
@@ -440,6 +447,18 @@ impl Renderer {
         }
         self.last_cover_hash = hash;
         self.album_art = self.decode_image_bytes(bytes);
+        if let Some(ref art) = self.album_art {
+            unsafe {
+                let bmp_props = D2D1_BITMAP_BRUSH_PROPERTIES1 {
+                    extendModeX: D2D1_EXTEND_MODE_CLAMP,
+                    extendModeY: D2D1_EXTEND_MODE_CLAMP,
+                    interpolationMode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
+                };
+                self.brush_album_art = self.d2d_context.CreateBitmapBrush(art, Some(&bmp_props), None).ok();
+            }
+        } else {
+            self.brush_album_art = None;
+        }
         if dynamic_color {
             if let Some(col) = self.extract_dominant_color(bytes) {
                 self.accent_color = col;
@@ -579,18 +598,10 @@ impl Renderer {
                 * windows_numerics::Matrix3x2::scale(scale, scale)
                 * windows_numerics::Matrix3x2::translation(cx, cy);
 
-            let bmp_props = D2D1_BITMAP_BRUSH_PROPERTIES1 {
-                extendModeX: D2D1_EXTEND_MODE_CLAMP,
-                extendModeY: D2D1_EXTEND_MODE_CLAMP,
-                interpolationMode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-            };
-            let brush_props = D2D1_BRUSH_PROPERTIES {
-                opacity: alpha,
-                transform: brush_transform,
-            };
-
-            if let Ok(bmp_brush) = self.d2d_context.CreateBitmapBrush(art, Some(&bmp_props), Some(&brush_props)) {
-                self.d2d_context.FillRoundedRectangle(&badge_rect, &bmp_brush);
+            if let Some(ref brush) = self.brush_album_art {
+                brush.SetTransform(&brush_transform);
+                brush.SetOpacity(alpha);
+                self.d2d_context.FillRoundedRectangle(&badge_rect, brush);
             }
 
             self.brush_border.SetColor(&D2D1_COLOR_F {
@@ -958,21 +969,13 @@ impl Renderer {
                 * windows_numerics::Matrix3x2::scale(scale, scale)
                 * windows_numerics::Matrix3x2::translation(cx, cy);
 
-            let bmp_props = D2D1_BITMAP_BRUSH_PROPERTIES1 {
-                extendModeX: D2D1_EXTEND_MODE_CLAMP,
-                extendModeY: D2D1_EXTEND_MODE_CLAMP,
-                interpolationMode: D2D1_INTERPOLATION_MODE_HIGH_QUALITY_CUBIC,
-            };
-            let brush_props = D2D1_BRUSH_PROPERTIES {
-                opacity: alpha,
-                transform: brush_transform,
-            };
-
-            if let Ok(bmp_brush) = self.d2d_context.CreateBitmapBrush(art, Some(&bmp_props), Some(&brush_props)) {
+            if let Some(ref brush) = self.brush_album_art {
+                brush.SetTransform(&brush_transform);
+                brush.SetOpacity(alpha);
                 let angle_deg = rotation_rad.to_degrees();
                 let center = windows_numerics::Vector2 { X: cx, Y: cy };
                 self.d2d_context.SetTransform(&windows_numerics::Matrix3x2::rotation_around(angle_deg, center));
-                self.d2d_context.FillEllipse(&circle, &bmp_brush);
+                self.d2d_context.FillEllipse(&circle, brush);
                 self.d2d_context.SetTransform(&windows_numerics::Matrix3x2::identity());
             }
         }
@@ -2575,110 +2578,69 @@ impl Renderer {
 
                 let lyrics_box = D2D_RECT_F {
                     left: col_r,
-                    top: top_c + 16.0,
+                    top: top_c + 12.0,
                     right: right_c,
-                    bottom: top_c + 72.0,
+                    bottom: top_c + 74.0,
                 };
                 self.d2d_context.PushAxisAlignedClip(&lyrics_box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-                let is_long_curr = curr_line_str.len() > 32;
-
-                if is_long_curr {
-                    // Long line: Active current line wraps nicely across 2-3 lines (height ~38px)
-                    let cur_utf: Vec<u16> = curr_line_str.encode_utf16().collect();
-                    let cur_rect = D2D_RECT_F {
+                // 1. Previous Line (Top, Dimmed Subtitle)
+                if let Some(prev) = prev_line_opt {
+                    let prev_utf: Vec<u16> = prev.encode_utf16().collect();
+                    let p_rect = D2D_RECT_F {
                         left: col_r,
-                        top: top_c + 16.0,
+                        top: top_c + 12.0,
                         right: right_c,
-                        bottom: top_c + 54.0,
+                        bottom: top_c + 27.0,
                     };
-                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-                    self.brush_white.SetOpacity((0.72 + 0.26 * fade_alpha) * alpha);
+                    self.brush_subtext.SetOpacity(0.45 * alpha);
                     self.d2d_context.DrawText(
-                        &cur_utf,
-                        &self.format_lyrics,
-                        &cur_rect as *const _,
-                        &self.brush_white,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        &prev_utf,
+                        &self.format_lyrics_sub,
+                        &p_rect as *const _,
+                        &self.brush_subtext,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
                         DWRITE_MEASURING_MODE_NATURAL,
                     );
+                }
 
-                    // Next line below it in dim gray
-                    if let Some(next) = next_line_opt {
-                        let next_utf: Vec<u16> = next.encode_utf16().collect();
-                        let n_rect = D2D_RECT_F {
-                            left: col_r,
-                            top: top_c + 55.0,
-                            right: right_c,
-                            bottom: top_c + 70.0,
-                        };
-                        self.brush_subtext.SetOpacity(0.42 * alpha);
-                        self.d2d_context.DrawText(
-                            &next_utf,
-                            &self.format_lyrics_sub,
-                            &n_rect as *const _,
-                            &self.brush_subtext,
-                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                            DWRITE_MEASURING_MODE_NATURAL,
-                        );
-                    }
-                } else {
-                    // Standard line: Shows Previous line (top), Active line (middle), Next line (bottom)
-                    if let Some(prev) = prev_line_opt {
-                        let prev_utf: Vec<u16> = prev.encode_utf16().collect();
-                        let p_rect = D2D_RECT_F {
-                            left: col_r,
-                            top: top_c + 16.0,
-                            right: right_c,
-                            bottom: top_c + 29.0,
-                        };
-                        self.brush_subtext.SetOpacity(0.42 * alpha);
-                        self.d2d_context.DrawText(
-                            &prev_utf,
-                            &self.format_lyrics_sub,
-                            &p_rect as *const _,
-                            &self.brush_subtext,
-                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                            DWRITE_MEASURING_MODE_NATURAL,
-                        );
-                    }
+                // 2. Active Current Line (Center, Large Bold White with organic fade)
+                let cur_utf: Vec<u16> = curr_line_str.encode_utf16().collect();
+                let cur_rect = D2D_RECT_F {
+                    left: col_r,
+                    top: top_c + 28.0,
+                    right: right_c,
+                    bottom: top_c + 54.0,
+                };
+                self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+                self.brush_white.SetOpacity((0.80 + 0.20 * fade_alpha) * alpha);
+                self.d2d_context.DrawText(
+                    &cur_utf,
+                    &self.format_lyrics,
+                    &cur_rect as *const _,
+                    &self.brush_white,
+                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
+                    DWRITE_MEASURING_MODE_NATURAL,
+                );
 
-                    let cur_utf: Vec<u16> = curr_line_str.encode_utf16().collect();
-                    let cur_rect = D2D_RECT_F {
+                // 3. Next Line (Bottom, Dimmed Subtitle)
+                if let Some(next) = next_line_opt {
+                    let next_utf: Vec<u16> = next.encode_utf16().collect();
+                    let n_rect = D2D_RECT_F {
                         left: col_r,
-                        top: top_c + 30.0,
+                        top: top_c + 55.0,
                         right: right_c,
-                        bottom: top_c + 50.0,
+                        bottom: top_c + 70.0,
                     };
-                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-                    self.brush_white.SetOpacity((0.72 + 0.26 * fade_alpha) * alpha);
+                    self.brush_subtext.SetOpacity(0.45 * alpha);
                     self.d2d_context.DrawText(
-                        &cur_utf,
-                        &self.format_lyrics,
-                        &cur_rect as *const _,
-                        &self.brush_white,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        &next_utf,
+                        &self.format_lyrics_sub,
+                        &n_rect as *const _,
+                        &self.brush_subtext,
+                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
                         DWRITE_MEASURING_MODE_NATURAL,
                     );
-
-                    if let Some(next) = next_line_opt {
-                        let next_utf: Vec<u16> = next.encode_utf16().collect();
-                        let n_rect = D2D_RECT_F {
-                            left: col_r,
-                            top: top_c + 53.0,
-                            right: right_c,
-                            bottom: top_c + 70.0,
-                        };
-                        self.brush_subtext.SetOpacity(0.42 * alpha);
-                        self.d2d_context.DrawText(
-                            &next_utf,
-                            &self.format_lyrics_sub,
-                            &n_rect as *const _,
-                            &self.brush_subtext,
-                            D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                            DWRITE_MEASURING_MODE_NATURAL,
-                        );
-                    }
                 }
 
                 self.d2d_context.PopAxisAlignedClip();
@@ -3331,7 +3293,7 @@ impl Renderer {
     }
 
     unsafe fn draw_compact_lyric_or_title(
-        &self,
+        &mut self,
         island: &Island,
         config: &crate::config::AppConfig,
         clip_left: f32,
@@ -3364,16 +3326,23 @@ impl Renderer {
         if let Some((curr_str, progress, _line_progress, fade_alpha)) = lyric_info_opt {
             let utf16: Vec<u16> = curr_str.encode_utf16().collect();
 
-            // Accurately measure the exact rendered glyph width with DirectWrite
-            let text_width = if let Ok(layout) = self.dwrite_factory.CreateTextLayout(&utf16, &self.format_body, 3000.0, 40.0) {
-                let mut metrics = DWRITE_TEXT_METRICS::default();
-                if layout.GetMetrics(&mut metrics).is_ok() {
-                    metrics.widthIncludingTrailingWhitespace.max(metrics.width)
+            // Accurately measure the exact rendered glyph width with DirectWrite (cached per lyric line)
+            let text_width = if self.cached_lyric_line == curr_str {
+                self.cached_lyric_width
+            } else {
+                let measured = if let Ok(layout) = self.dwrite_factory.CreateTextLayout(&utf16, &self.format_body, 3000.0, 40.0) {
+                    let mut metrics = DWRITE_TEXT_METRICS::default();
+                    if layout.GetMetrics(&mut metrics).is_ok() {
+                        metrics.widthIncludingTrailingWhitespace.max(metrics.width)
+                    } else {
+                        (utf16.len() as f32) * 6.0
+                    }
                 } else {
                     (utf16.len() as f32) * 6.0
-                }
-            } else {
-                (utf16.len() as f32) * 6.0
+                };
+                self.cached_lyric_line = curr_str.clone();
+                self.cached_lyric_width = measured;
+                measured
             };
 
             // Stable, High-Legibility Karaoke Display:
@@ -3845,7 +3814,23 @@ impl Renderer {
                             right: text_right - 42.0,
                             bottom: top + (pill_h * 0.88),
                         };
-                        let artist_text = if track.artist.is_empty() {
+                        let artist_text = if config.show_lyrics_in_capsule {
+                            if let Some(ref lyrics) = island.current_lyrics {
+                                let pos = track.position_secs;
+                                let info = lyrics.get_active_line_info(pos, island.romanize_cjk_lyrics);
+                                if !info.curr.is_empty() && info.curr != "•••" && info.curr != "No lyrics available" && info.curr != "Instrumental Break" {
+                                    info.curr.to_string()
+                                } else if track.artist.is_empty() {
+                                    "Now Playing".to_string()
+                                } else {
+                                    track.artist.clone()
+                                }
+                            } else if track.artist.is_empty() {
+                                "Now Playing".to_string()
+                            } else {
+                                track.artist.clone()
+                            }
+                        } else if track.artist.is_empty() {
                             "Now Playing".to_string()
                         } else {
                             track.artist.clone()

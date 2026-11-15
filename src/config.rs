@@ -183,7 +183,7 @@ impl Default for AppConfig {
             smart_contour: true,
             contour_nudge_y: 34.0,
             start_with_windows: is_autostart_enabled(),
-            use_full_media_card: false,
+            use_full_media_card: true,
             show_lyrics_in_capsule: true,
             romanize_cjk_lyrics: false,
             prayer_city: "Jakarta".to_string(),

@@ -36,7 +36,7 @@ use windows::{
     core::*,
     Win32::{
         Foundation::*,
-        Graphics::Gdi::{CreateRectRgn, CreateRoundRectRgn, SetWindowRgn, HBRUSH},
+        Graphics::Gdi::{SetWindowRgn, HBRUSH},
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
@@ -47,7 +47,7 @@ use windows::{
 };
 
 const WINDOW_WIDTH: u32 = 720;
-const WINDOW_HEIGHT: u32 = 180;
+const WINDOW_HEIGHT: u32 = 240;
 const TIMER_ID: usize = 1001;
 const TIMER_INTERVAL_MS: u32 = 16; // ~60 FPS smooth animation tick
 const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
@@ -71,7 +71,6 @@ struct AppState {
     smoothed_dt: f32,
     is_tracking_mouse: bool,
     hover_dwell_time: f32,
-    idle_settled_timer: f32,
     last_rgn_rect: (i32, i32, i32, i32),
     notif_receiver: Receiver<Notification>,
     media_sender: std::sync::mpsc::Sender<MediaEvent>,
@@ -84,47 +83,24 @@ struct AppState {
     lyrics_retry_at: Option<Instant>,
     gps_sender: std::sync::mpsc::Sender<std::result::Result<(f64, f64, f64, String), String>>,
     gps_receiver: Receiver<std::result::Result<(f64, f64, f64, String), String>>,
+
+    // Performance throttles:
+    last_fg: HWND,
+    last_fg_is_fullscreen: bool,
+    last_fg_is_browser: bool,
+    fg_check_timer: f32,
+    topmost_timer: f32,
+    volume_sync_timer: f32,
 }
 
-/// Dynamically syncs the OS window clipping region (GDI HRGN) to the exact pill capsule geometry.
-/// Any pixels outside this region physically DO NOT EXIST to the Windows Window Manager,
-/// allowing 100% unimpeded clicks directly through to underlying browser tabs, search bars, and breadcrumbs!
+/// Ensures no restrictive GDI clipping region is applied to the HWND.
+/// True per-pixel transparency and click-through are handled by DirectComposition
+/// and WM_NCHITTEST with zero visual cropping and zero jagged clipping.
 fn sync_window_region(hwnd: HWND, state: &mut AppState) {
-    let (left, top, right, bottom) = state.island.get_pill_rect();
-    let cur_r = state.island.radius_spring.current;
-
-    // Check if in pure idle mode with click-through enabled
-    if state.config.idle_click_through
-        && state.island.mode == island::IslandMode::Idle
-        && !state.island.is_media_playing
-        && state.island.current_track.is_none()
-    {
-        let cur = (0, 0, 0, 0);
-        if state.last_rgn_rect != cur {
-            state.last_rgn_rect = cur;
-            unsafe {
-                let empty_rgn = CreateRectRgn(0, 0, 0, 0);
-                let _ = SetWindowRgn(hwnd, Some(empty_rgn), false);
-            }
-        }
-        return;
-    }
-
-    // Dynamic outer margin: when glow is active, provide generous 16px padding so Direct2D
-    // soft ambient glow is completely unclipped and buttery smooth!
-    let pad = if state.config.glow_intensity > 0.01 { 16.0f32 } else { 3.0f32 };
-    let l = (left - pad).round().max(0.0) as i32;
-    let t = (top - pad).round().max(0.0) as i32;
-    let r = (right + pad).round().min(WINDOW_WIDTH as f32) as i32;
-    let b = (bottom + pad).round().min(WINDOW_HEIGHT as f32) as i32;
-    let cur = (l, t, r, b);
-
-    if state.last_rgn_rect != cur {
-        state.last_rgn_rect = cur;
+    if state.last_rgn_rect != (0, 0, 0, 0) {
+        state.last_rgn_rect = (0, 0, 0, 0);
         unsafe {
-            let diam = (((cur_r + pad) * 2.0).round() as i32).max(1);
-            let rgn = CreateRoundRectRgn(l, t, r, b, diam, diam);
-            let _ = SetWindowRgn(hwnd, Some(rgn), false);
+            let _ = SetWindowRgn(hwnd, None, false);
         }
     }
 }
@@ -178,9 +154,39 @@ fn is_foreground_fullscreen(fg: HWND, screen_w: i32, screen_h: i32) -> bool {
     }
 }
 
+/// Inspects if the foreground window is a browser docked/maximized at the top of the screen.
+fn check_is_browser_at_top(fg: HWND, hwnd: HWND) -> bool {
+    if fg.0.is_null() || fg == hwnd {
+        return false;
+    }
+    unsafe {
+        let mut rc = RECT::default();
+        if GetWindowRect(fg, &mut rc).is_err() {
+            return false;
+        }
+
+        // Check if the foreground window is docked or maximized at the top
+        let is_at_top = rc.top <= 24 && rc.bottom >= 400 && (rc.right - rc.left) >= 500;
+        if is_at_top {
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(fg, Some(&mut pid));
+            if pid != 0 {
+                let exe = crate::media::get_process_name(pid).to_lowercase();
+                return exe.contains("chrome")
+                    || exe.contains("msedge")
+                    || exe.contains("brave")
+                    || exe.contains("firefox")
+                    || exe.contains("opera")
+                    || exe.contains("vivaldi");
+            }
+        }
+    }
+    false
+}
+
 /// Automatically nudges the island down when active foreground app is a browser with top tabs,
 /// or when FocusGrow Health HUD (F:\Android Project\focusgrow-rs) is actively showing.
-fn update_smart_contour(state: &mut AppState, fg: HWND, hwnd: HWND) {
+fn update_smart_contour(state: &mut AppState) {
     if !state.config.smart_contour {
         state.island.y_spring.set_target(state.config.top_margin);
         return;
@@ -199,43 +205,12 @@ fn update_smart_contour(state: &mut AppState, fg: HWND, hwnd: HWND) {
         }
     }
 
-    if fg.0.is_null() || fg == hwnd {
-        return;
+    if state.last_fg_is_browser {
+        state.island.y_spring.set_target(state.config.contour_nudge_y + state.config.top_margin);
+    } else {
+        // For desktop, File Explorer, settings, or floating windows: stay flush at top!
+        state.island.y_spring.set_target(state.config.top_margin);
     }
-
-    unsafe {
-        let mut rc = RECT::default();
-        let _ = GetWindowRect(fg, &mut rc);
-
-        // Check if the foreground window is docked or maximized at the top
-        let is_at_top = rc.top <= 24 && rc.bottom >= 400 && (rc.right - rc.left) >= 500;
-
-        if is_at_top {
-            let mut pid = 0u32;
-            GetWindowThreadProcessId(fg, Some(&mut pid));
-            if pid != 0 {
-                let exe = crate::media::get_process_name(pid).to_lowercase();
-
-                // Strictly target web browsers (Chrome, Edge, Brave, Firefox, Opera, Vivaldi)
-                // that always feature a top tab strip when browsing!
-                let is_browser = exe.contains("chrome")
-                    || exe.contains("msedge")
-                    || exe.contains("brave")
-                    || exe.contains("firefox")
-                    || exe.contains("opera")
-                    || exe.contains("vivaldi");
-
-                if is_browser {
-                    // Smoothly nudge down to contour_nudge_y (default 34px, just below tab strip, well above bookmarks)
-                    state.island.y_spring.set_target(state.config.contour_nudge_y + state.config.top_margin);
-                    return;
-                }
-            }
-        }
-    }
-
-    // For desktop, File Explorer, settings, or floating windows: stay flush at top!
-    state.island.y_spring.set_target(state.config.top_margin);
 }
 
 unsafe extern "system" fn wndproc(
@@ -985,7 +960,9 @@ unsafe extern "system" fn wndproc(
 
                     // Immediately re-evaluate contour and vertical positioning for live top_margin updates!
                     let fg = GetForegroundWindow();
-                    update_smart_contour(state, fg, hwnd);
+                    state.last_fg = fg;
+                    state.last_fg_is_browser = check_is_browser_at_top(fg, hwnd);
+                    update_smart_contour(state);
 
                     // Re-sync window region clipping and render frame immediately
                     sync_window_region(hwnd, state);
@@ -1007,8 +984,10 @@ unsafe extern "system" fn wndproc(
                 if !state_ptr.is_null() {
                     let state = &mut *state_ptr;
 
-                    // Sync system master volume when not actively dragging
-                    if !state.dragging_volume {
+                    // Sync system master volume when expanded or throttled to twice per second
+                    state.volume_sync_timer += 0.016;
+                    if !state.dragging_volume && (state.island.mode == island::IslandMode::Expanded || state.volume_sync_timer >= 0.5) {
+                        state.volume_sync_timer = 0.0;
                         state.island.volume = state.audio_meter.get_volume();
                     }
 
@@ -1247,13 +1226,20 @@ unsafe extern "system" fn wndproc(
                     state.island.audio_peak = state.audio_meter.update(dt);
 
                     let fg = GetForegroundWindow();
-                    let screen_w = GetSystemMetrics(SM_CXSCREEN);
-                    let screen_h = GetSystemMetrics(SM_CYSCREEN);
+                    state.fg_check_timer += dt;
+                    if fg != state.last_fg || state.fg_check_timer >= 0.5 {
+                        state.fg_check_timer = 0.0;
+                        state.last_fg = fg;
+                        let screen_w = GetSystemMetrics(SM_CXSCREEN);
+                        let screen_h = GetSystemMetrics(SM_CYSCREEN);
+                        state.last_fg_is_fullscreen = is_foreground_fullscreen(fg, screen_w, screen_h);
+                        state.last_fg_is_browser = check_is_browser_at_top(fg, hwnd);
+                    }
 
                     // 1. Fullscreen Auto-Hide:
                     // If active foreground window is fullscreen (e.g. Netflix, YouTube Fullscreen, Video, Games),
                     // smoothly hide the Dynamic Island completely so it never blocks video or gameplay!
-                    if is_foreground_fullscreen(fg, screen_w, screen_h) {
+                    if state.last_fg_is_fullscreen {
                         state.island.alpha_spring.set_target(0.0);
                         state.island.y_spring.set_target(-100.0);
                         state.island.update(dt);
@@ -1262,20 +1248,24 @@ unsafe extern "system" fn wndproc(
                         let _ = state.renderer.render(&state.island, &state.config);
                         return LRESULT(0);
                     } else {
-                        // Strictly maintain HWND_TOPMOST so Dynamic Island is permanently on top of all windows
-                        let _ = SetWindowPos(
-                            hwnd,
-                            Some(HWND_TOPMOST),
-                            0,
-                            0,
-                            0,
-                            0,
-                            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
-                        );
+                        // Maintain HWND_TOPMOST throttled to 1.5s (reduces DWM z-order thrashing by 99%)
+                        state.topmost_timer += dt;
+                        if state.topmost_timer >= 1.5 {
+                            state.topmost_timer = 0.0;
+                            let _ = SetWindowPos(
+                                hwnd,
+                                Some(HWND_TOPMOST),
+                                0,
+                                0,
+                                0,
+                                0,
+                                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+                            );
+                        }
                     }
 
                     // 2. Smart Dynamic Contour Avoidance:
-                    update_smart_contour(state, fg, hwnd);
+                    update_smart_contour(state);
 
                     // Cursor hover detection & hover-to-expand
                     let mut cursor = POINT::default();
@@ -1327,12 +1317,6 @@ unsafe extern "system" fn wndproc(
                         }
                     }
 
-                    // Periodic Working Set Trimming every 12 seconds to keep RAM strictly low (15-20 MB):
-                    state.idle_settled_timer += dt;
-                    if state.idle_settled_timer >= 12.0 {
-                        state.idle_settled_timer = 0.0;
-                        trim_working_set();
-                    }
 
                     sync_window_region(hwnd, state);
                     let _ = state.renderer.render(&state.island, &state.config);
@@ -1524,7 +1508,6 @@ fn run_app() -> Result<()> {
             smoothed_dt: 0.016,
             is_tracking_mouse: false,
             hover_dwell_time: 0.0,
-            idle_settled_timer: 0.0,
             last_rgn_rect: (-1, -1, -1, -1),
             notif_receiver: notif_rx,
             media_sender: media_tx,
@@ -1537,6 +1520,12 @@ fn run_app() -> Result<()> {
             lyrics_retry_at: None,
             gps_sender: gps_tx,
             gps_receiver: gps_rx,
+            last_fg: HWND::default(),
+            last_fg_is_fullscreen: false,
+            last_fg_is_browser: false,
+            fg_check_timer: 1.0,
+            topmost_timer: 0.0,
+            volume_sync_timer: 0.0,
         });
 
         // Store AppState pointer into window UserData

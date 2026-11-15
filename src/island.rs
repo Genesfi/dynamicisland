@@ -156,7 +156,7 @@ impl Island {
             show_lyrics_in_capsule: true,
             island_style: crate::config::IslandStyle::SleekCapsule,
             volume: 0.5,
-            use_full_media_card: false,
+            use_full_media_card: true,
             hover_leave_timer: 0.0,
             current_card: 2, // Default to MusicLyrics card
             card_scroll_spring: Spring::new(2.0, 270.0, 25.0),

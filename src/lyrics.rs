@@ -497,6 +497,155 @@ fn fetch_netease_candidates(
     candidates
 }
 
+#[derive(Deserialize, Debug)]
+struct KugouSongItem {
+    #[serde(rename = "FileHash")]
+    file_hash: Option<String>,
+    #[serde(rename = "Duration")]
+    duration: Option<u32>,
+    #[serde(rename = "SingerName")]
+    singer_name: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct KugouSearchData {
+    lists: Option<Vec<KugouSongItem>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct KugouSearchResponse {
+    data: Option<KugouSearchData>,
+}
+
+#[derive(Deserialize, Debug)]
+struct KugouLyricCandidate {
+    id: Option<String>,
+    accesskey: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct KugouKrcsResponse {
+    candidates: Option<Vec<KugouLyricCandidate>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct KugouDownloadResponse {
+    content: Option<String>,
+}
+
+fn base64_decode_string(input: &str) -> Option<String> {
+    let mut bytes = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits = 0;
+    for b in input.bytes() {
+        let val = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' | b'\r' | b'\n' | b' ' => continue,
+            _ => return None,
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            bytes.push((buf >> bits) as u8);
+            buf &= (1 << bits) - 1;
+        }
+    }
+    let s = String::from_utf8(bytes).ok()?;
+    Some(s.strip_prefix('\u{feff}').unwrap_or(&s).to_string())
+}
+
+fn fetch_kugou_candidates(
+    clean_title: &str,
+    clean_artist: &str,
+    original_title: &str,
+    original_artist: &str,
+    target_duration: f32,
+) -> Vec<SongLyrics> {
+    let query = if clean_artist.is_empty() {
+        clean_title.to_string()
+    } else {
+        format!("{} {}", clean_title, clean_artist)
+    };
+    let enc_query = url_encode(query.trim());
+
+    let search_url = format!(
+        "https://songsearch.kugou.com/song_search_v2?keyword={}&page=1&pagesize=2&platform=WebFilter&format=json",
+        enc_query
+    );
+
+    let mut candidates = Vec::new();
+
+    let json_resp = match fetch_url_string(&search_url) {
+        Some(j) => j,
+        None => return candidates,
+    };
+
+    let search_data: KugouSearchResponse = match serde_json::from_str(&json_resp) {
+        Ok(d) => d,
+        Err(_) => return candidates,
+    };
+
+    let lists = match search_data.data.and_then(|d| d.lists) {
+        Some(l) => l,
+        None => return candidates,
+    };
+
+    for item in lists.into_iter().take(2) {
+        let hash = match item.file_hash {
+            Some(h) if !h.is_empty() => h,
+            _ => continue,
+        };
+        let dur_ms = item.duration.unwrap_or(target_duration as u32) * 1000;
+        let singer = item.singer_name.unwrap_or_else(|| original_artist.to_string());
+
+        let krcs_url = format!(
+            "http://krcs.kugou.com/search?ver=1&man=yes&client=mobi&duration={}&hash={}",
+            dur_ms, hash
+        );
+
+        if let Some(krcs_json) = fetch_url_string(&krcs_url) {
+            if let Ok(krcs_data) = serde_json::from_str::<KugouKrcsResponse>(&krcs_json) {
+                if let Some(cand_list) = krcs_data.candidates {
+                    if let Some(first_cand) = cand_list.first() {
+                        if let (Some(id), Some(key)) = (&first_cand.id, &first_cand.accesskey) {
+                            let dl_url = format!(
+                                "http://lyrics.kugou.com/download?ver=1&client=pc&id={}&accesskey={}&fmt=lrc&charset=utf8",
+                                id, key
+                            );
+                            if let Some(dl_json) = fetch_url_string(&dl_url) {
+                                if let Ok(dl_data) = serde_json::from_str::<KugouDownloadResponse>(&dl_json) {
+                                    if let Some(b64) = dl_data.content {
+                                        if let Some(raw_lrc) = base64_decode_string(&b64) {
+                                            if !raw_lrc.trim().is_empty() {
+                                                let mut parsed = parse_lrc(&raw_lrc, original_title, original_artist);
+                                                let dur_s = dur_ms / 1000;
+                                                let mins = dur_s / 60;
+                                                let secs = dur_s % 60;
+                                                parsed.candidate_info = format!("{} [KuGou] ({}:{:02})", singer, mins, secs);
+                                                if !parsed.lines.is_empty() {
+                                                    candidates.push(parsed);
+                                                    break;
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
 fn score_candidate(
     cand: &LrclibResponse,
     target_title: &str,
@@ -874,6 +1023,26 @@ pub fn fetch_lyrics_async(
             if !netease_cands.is_empty() {
                 let old_lrclib = std::mem::replace(&mut parsed_candidates, netease_cands);
                 for item in old_lrclib {
+                    parsed_candidates.push(item);
+                }
+            }
+        }
+
+        // KuGou Music Fallback:
+        // If neither LRCLIB nor NetEase found synced lyrics, query KuGou!
+        let has_synced_so_far = parsed_candidates.iter().any(|c| !c.lines.is_empty());
+        if !has_synced_so_far {
+            let kugou_cands = fetch_kugou_candidates(
+                &clean_title,
+                &clean_artist,
+                &title,
+                &artist,
+                duration_secs,
+            );
+
+            if !kugou_cands.is_empty() {
+                let old_cands = std::mem::replace(&mut parsed_candidates, kugou_cands);
+                for item in old_cands {
                     parsed_candidates.push(item);
                 }
             }
