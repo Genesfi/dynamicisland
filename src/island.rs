@@ -100,10 +100,20 @@ pub struct Island {
     pub show_lyrics: bool,
     pub romanize_cjk_lyrics: bool,
     pub current_lyrics: Option<crate::lyrics::SongLyrics>,
+    pub lyrics_candidates: Vec<crate::lyrics::SongLyrics>,
+    pub active_candidate_idx: usize,
     pub lyrics_loading: bool,
     pub battery: crate::battery::BatteryStatus,
     pub battery_timer: f32,
     pub hydration: crate::hydration::HydrationTracker,
+    pub prayer: crate::prayer::PrayerTracker,
+    pub prayer_timer: f32,
+    pub sun_anim_t: Spring,
+    pub recent_notifications: Vec<Notification>,
+    pub tasks: crate::tasks::TaskManager,
+    pub calendar: crate::calendar::CalendarTracker,
+    pub entering_task: Option<String>,
+    pub caret_timer: f32,
 }
 
 pub const IDLE_WIDTH: f32 = 148.0;
@@ -154,10 +164,20 @@ impl Island {
             show_lyrics: false,
             romanize_cjk_lyrics: false,
             current_lyrics: None,
+            lyrics_candidates: Vec::new(),
+            active_candidate_idx: 0,
             lyrics_loading: false,
             battery: crate::battery::BatteryStatus::query(),
             battery_timer: 0.0,
             hydration: crate::hydration::HydrationTracker::load(),
+            prayer: crate::prayer::PrayerTracker::default(),
+            prayer_timer: 0.0,
+            sun_anim_t: Spring::new(0.0, 180.0, 20.0),
+            recent_notifications: Vec::new(),
+            tasks: crate::tasks::TaskManager::load(),
+            calendar: crate::calendar::CalendarTracker::default(),
+            entering_task: None,
+            caret_timer: 0.0,
         }
     }
 
@@ -196,6 +216,13 @@ impl Island {
     }
 
     pub fn show_notification(&mut self, notif: Notification) {
+        if !self.recent_notifications.iter().any(|n| n.title == notif.title && n.body == notif.body) {
+            self.recent_notifications.insert(0, notif.clone());
+            if self.recent_notifications.len() > 10 {
+                self.recent_notifications.truncate(10);
+            }
+        }
+
         self.active_notification = Some(notif);
         self.mode = IslandMode::Slim;
         self.remaining_time = 5.0; // Display as sleek slim bar for 5.0 seconds
@@ -263,6 +290,41 @@ impl Island {
         self.hover_leave_timer = 0.0;
     }
 
+    pub fn cycle_lyrics_candidate(&mut self) {
+        if self.lyrics_candidates.len() <= 1 {
+            return;
+        }
+        self.active_candidate_idx = (self.active_candidate_idx + 1) % self.lyrics_candidates.len();
+        let selected = self.lyrics_candidates[self.active_candidate_idx].clone();
+
+        // Save selected candidate to disk cache so it persists
+        if let Some(dir) = crate::lyrics::get_lyrics_dir() {
+            if let Some(ref track) = self.current_track {
+                let key = crate::lyrics::get_cache_key(&track.artist, &track.title);
+                let safe_filename: String = key.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+                let file_path = dir.join(format!("{}.lrc", safe_filename));
+                let _ = std::fs::write(file_path, &selected.raw_lrc);
+            }
+        }
+
+        self.current_lyrics = Some(selected);
+    }
+
+    pub fn clear_cached_lyrics(&mut self) {
+        if let Some(dir) = crate::lyrics::get_lyrics_dir() {
+            if let Some(ref track) = self.current_track {
+                let key = crate::lyrics::get_cache_key(&track.artist, &track.title);
+                let safe_filename: String = key.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
+                let file_path = dir.join(format!("{}.lrc", safe_filename));
+                let _ = std::fs::remove_file(file_path);
+                crate::lyrics::remove_from_memory_cache(&key);
+            }
+        }
+        self.current_lyrics = None;
+        self.lyrics_candidates.clear();
+        self.active_candidate_idx = 0;
+    }
+
     pub fn toggle_full_card(&mut self) {
         if self.mode == IslandMode::FullCard {
             self.dismiss();
@@ -310,6 +372,20 @@ impl Island {
         if self.battery_timer >= 3.0 {
             self.battery_timer = 0.0;
             self.battery = crate::battery::BatteryStatus::query();
+        }
+
+        self.prayer_timer += dt;
+        if self.prayer_timer >= 1.0 {
+            self.prayer_timer = 0.0;
+            self.prayer.update();
+        }
+        self.sun_anim_t.set_target(self.prayer.sun_arc.sun_progress);
+        let moving_sun = self.sun_anim_t.update(dt);
+
+        self.calendar.update(dt);
+        self.caret_timer += dt;
+        if self.caret_timer > 1.0 {
+            self.caret_timer -= 1.0;
         }
 
         // Advance vinyl disc spin rotation & marquee running title when music is actively playing
@@ -366,7 +442,7 @@ impl Island {
             }
         }
 
-        moving_w || moving_h || moving_r || moving_a || moving_y || moving_card || moving_shelf || self.mode != IslandMode::Idle || self.is_media_playing
+        moving_w || moving_h || moving_r || moving_a || moving_y || moving_card || moving_shelf || moving_sun || self.mode != IslandMode::Idle || self.is_media_playing
     }
 
     /// Returns the current bounding rectangle of the island pill inside window coordinates.

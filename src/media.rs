@@ -324,7 +324,6 @@ fn handle_ytmpx_json(text: &str, sender: &Sender<MediaEvent>) -> Option<String> 
                 meta.status.as_deref() != Some("paused")
             });
 
-            let artist_for_lyrics = artist.clone();
             let notif = Notification {
                 app_name: "YouTube Music".to_string(),
                 title: title.clone(),
@@ -355,13 +354,6 @@ fn handle_ytmpx_json(text: &str, sender: &Sender<MediaEvent>) -> Option<String> 
                 duration_secs,
             });
             let _ = sender.send(MediaEvent::PlaybackState(is_playing));
-
-            crate::lyrics::fetch_lyrics_async(
-                title.clone(),
-                artist_for_lyrics,
-                duration_secs,
-                sender.clone(),
-            );
 
             if !art_url.is_empty() {
                 return Some(art_url);

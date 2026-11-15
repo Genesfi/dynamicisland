@@ -44,6 +44,7 @@ pub struct Renderer {
     format_hero: IDWriteTextFormat,
     format_display: IDWriteTextFormat,
     format_tag: IDWriteTextFormat,
+    format_pill_tag: IDWriteTextFormat,
     format_lyrics: IDWriteTextFormat,
     format_lyrics_sub: IDWriteTextFormat,
 
@@ -63,6 +64,7 @@ pub struct Renderer {
 
     pub accent_color: (f32, f32, f32),
     pub album_art: Option<ID2D1Bitmap>,
+    pub last_cover_hash: u64,
     pub wic_factory: IWICImagingFactory,
     #[allow(dead_code)]
     pub icon_manager: crate::icons::IconManager,
@@ -70,6 +72,18 @@ pub struct Renderer {
     pub cached_is_light: bool,
     #[allow(dead_code)]
     pub lum_frame_counter: u32,
+}
+
+#[inline]
+fn fast_cover_hash(bytes: &[u8]) -> u64 {
+    let mut h = bytes.len() as u64;
+    for &b in bytes.iter().take(64) {
+        h = h.wrapping_mul(31).wrapping_add(b as u64);
+    }
+    for &b in bytes.iter().rev().take(64) {
+        h = h.wrapping_mul(31).wrapping_add(b as u64);
+    }
+    h
 }
 
 #[inline]
@@ -265,6 +279,19 @@ impl Renderer {
             format_tag.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
             format_tag.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
 
+            let format_pill_tag = dwrite_factory.CreateTextFormat(
+                w!("Segoe UI Variable Text"),
+                None,
+                DWRITE_FONT_WEIGHT_SEMI_BOLD,
+                DWRITE_FONT_STYLE_NORMAL,
+                DWRITE_FONT_STRETCH_NORMAL,
+                9.5,
+                w!("en-us"),
+            )?;
+            format_pill_tag.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER)?;
+            format_pill_tag.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER)?;
+            format_pill_tag.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP)?;
+
             let format_lyrics = dwrite_factory.CreateTextFormat(
                 w!("Segoe UI Variable Display"),
                 None,
@@ -365,6 +392,7 @@ impl Renderer {
                 format_hero,
                 format_display,
                 format_tag,
+                format_pill_tag,
                 format_lyrics,
                 format_lyrics_sub,
                 brush_bg,
@@ -382,6 +410,7 @@ impl Renderer {
                 brush_accent,
                 accent_color: (0.20, 0.75, 1.0),
                 album_art: None,
+                last_cover_hash: 0,
                 icon_manager: crate::icons::IconManager::new(wic_factory.clone()),
                 wic_factory,
                 cached_is_light: false,
@@ -392,6 +421,7 @@ impl Renderer {
 
     pub fn clear_album_art(&mut self) {
         self.album_art = None;
+        self.last_cover_hash = 0;
         self.accent_color = (0.20, 0.75, 1.0);
         unsafe {
             let _ = self.brush_accent.SetColor(&D2D1_COLOR_F {
@@ -404,6 +434,11 @@ impl Renderer {
     }
 
     pub fn set_album_art(&mut self, bytes: &[u8], dynamic_color: bool) {
+        let hash = fast_cover_hash(bytes);
+        if self.last_cover_hash == hash && self.album_art.is_some() {
+            return;
+        }
+        self.last_cover_hash = hash;
         self.album_art = self.decode_image_bytes(bytes);
         if dynamic_color {
             if let Some(col) = self.extract_dominant_color(bytes) {
@@ -441,57 +476,39 @@ impl Renderer {
                 )
                 .ok()?;
 
-            let mut width: u32 = 0;
-            let mut height: u32 = 0;
-            converter.GetSize(&mut width, &mut height).ok()?;
-            if width == 0 || height == 0 {
-                return None;
-            }
+            // Downscale to 16x16 thumbnail using SIMD/hardware-accelerated area averaging.
+            // Takes <0.2ms and avoids allocating megabytes of raw image pixels on the UI thread!
+            let scaler: IWICBitmapScaler = self.wic_factory.CreateBitmapScaler().ok()?;
+            scaler
+                .Initialize(&converter, 16, 16, WICBitmapInterpolationModeFant)
+                .ok()?;
 
-            let stride = width * 4;
-            let total_bytes = (stride * height) as usize;
-            let mut pixels = vec![0u8; total_bytes.min(256 * 256 * 4)];
-            let hr = converter.CopyPixels(
-                std::ptr::null(),
-                stride,
-                &mut pixels,
-            );
-            if hr.is_err() {
-                return None;
-            }
+            let mut pixels = [0u8; 16 * 16 * 4];
+            scaler
+                .CopyPixels(std::ptr::null(), 16 * 4, &mut pixels)
+                .ok()?;
 
-            let step_x = (width / 32).max(1);
-            let step_y = (height / 32).max(1);
             let mut sum_r = 0.0f32;
             let mut sum_g = 0.0f32;
             let mut sum_b = 0.0f32;
             let mut count = 0;
 
-            let mut y = 0;
-            while y < height {
-                let mut x = 0;
-                while x < width {
-                    let idx = ((y * width + x) * 4) as usize;
-                    if idx + 3 < pixels.len() {
-                        let b = pixels[idx] as f32 / 255.0;
-                        let g = pixels[idx + 1] as f32 / 255.0;
-                        let r = pixels[idx + 2] as f32 / 255.0;
-                        let max_c = r.max(g).max(b);
-                        let min_c = r.min(g).min(b);
+            for chunk in pixels.chunks_exact(4) {
+                let b = chunk[0] as f32 / 255.0;
+                let g = chunk[1] as f32 / 255.0;
+                let r = chunk[2] as f32 / 255.0;
+                let max_c = r.max(g).max(b);
+                let min_c = r.min(g).min(b);
 
-                        if max_c > 0.15 && max_c < 0.95 {
-                            let sat = (max_c - min_c) / max_c;
-                            if sat > 0.18 {
-                                sum_r += r;
-                                sum_g += g;
-                                sum_b += b;
-                                count += 1;
-                            }
-                        }
+                if max_c > 0.15 && max_c < 0.95 {
+                    let sat = (max_c - min_c) / max_c;
+                    if sat > 0.18 {
+                        sum_r += r;
+                        sum_g += g;
+                        sum_b += b;
+                        count += 1;
                     }
-                    x += step_x;
                 }
-                y += step_y;
             }
 
             if count >= 8 {
@@ -1460,11 +1477,11 @@ impl Renderer {
 
             // --- Right Column: Mini Calendar & Task Status (Matching 01_today_dashboard.png) ---
             let days = ["M", "T", "W", "T", "F", "S", "S"];
-            let st = windows::Win32::System::SystemInformation::GetLocalTime();
-            let today_idx = match st.wDayOfWeek {
-                0 => 6, // Sunday
-                d => (d - 1) as usize, // Mon = 0
-            };
+            let (now_epoch, _off, y, m, d, _wday, _h, _mi) = crate::calendar::current_local_time();
+            let (y, m, d) = (y as i64, m as i64, d as i64);
+            let today_day_num = crate::calendar::days_from_civil(y, m, d);
+            let today_wday = (crate::calendar::weekday(today_day_num) + 6) % 7; // Monday=0..Sunday=6
+            let today_idx = today_wday as usize;
 
             let cal_w = right_c - col_r;
             let col_step = cal_w / 7.0;
@@ -1478,11 +1495,11 @@ impl Renderer {
                 self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.50, g: 0.52, b: 0.58, a: 0.80 * alpha });
                 self.d2d_context.DrawText(&day_utf, &self.format_tag, &d_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-                // Date number
+                // Date number using Howard Hinnant's civil_from_days
                 let date_cy = top_c + 26.0;
-                let diff_days = idx as i32 - today_idx as i32;
-                let num = (st.wDay as i32 + diff_days).max(1);
-                let num_str = format!("{}", num);
+                let target_day_num = today_day_num - today_wday + idx as i64;
+                let (_cy, _cm, target_day) = crate::calendar::civil_from_days(target_day_num);
+                let num_str = format!("{}", target_day);
                 let num_utf = num_str.encode_utf16().collect::<Vec<u16>>();
 
                 if idx == today_idx {
@@ -1500,12 +1517,20 @@ impl Renderer {
 
                 // Category dots under dates (blue=meeting, green=task, red=deadline, amber=event)
                 let dot_y = date_cy + 13.0;
-                let dot_color = match idx {
-                    1 => Some(D2D1_COLOR_F { r: 0.0, g: 0.71, b: 0.85, a: 0.90 * alpha }), // Cyan
-                    3 => Some(D2D1_COLOR_F { r: 0.18, g: 0.77, b: 0.71, a: 0.90 * alpha }), // Green
-                    4 => Some(D2D1_COLOR_F { r: 0.91, g: 0.11, b: 0.21, a: 0.90 * alpha }), // Red
-                    6 => Some(D2D1_COLOR_F { r: 1.0, g: 0.62, b: 0.11, a: 0.90 * alpha }), // Amber
-                    _ => None,
+                let dot_color = if idx == today_idx {
+                    if island.calendar.soon_meeting.is_some() {
+                        Some(D2D1_COLOR_F { r: 0.0, g: 0.71, b: 0.85, a: 0.90 * alpha }) // Cyan for meeting
+                    } else if !island.tasks.data.tasks.is_empty() {
+                        Some(D2D1_COLOR_F { r: 0.18, g: 0.77, b: 0.71, a: 0.90 * alpha }) // Green for tasks
+                    } else {
+                        None
+                    }
+                } else {
+                    match idx {
+                        1 => Some(D2D1_COLOR_F { r: 0.0, g: 0.71, b: 0.85, a: 0.90 * alpha }),
+                        4 => Some(D2D1_COLOR_F { r: 0.91, g: 0.11, b: 0.21, a: 0.90 * alpha }),
+                        _ => None,
+                    }
                 };
                 if let Some(col) = dot_color {
                     let cat_dot = D2D1_ELLIPSE { point: pt(day_cx, dot_y), radiusX: 1.8, radiusY: 1.8 };
@@ -1514,7 +1539,7 @@ impl Renderer {
                 }
             }
 
-            // Bottom task summary container (Matching 01_today_dashboard.png)
+            // Bottom task / meeting summary container
             let sum_rect = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F { left: col_r, top: top_c + 49.0, right: right_c, bottom: top_c + 85.0 },
                 radiusX: 8.0,
@@ -1523,26 +1548,76 @@ impl Renderer {
             self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.06 * alpha });
             self.d2d_context.FillRoundedRectangle(&sum_rect, &self.brush_btn_bg);
 
-            // Green glowing dot
-            let dot_g = D2D1_ELLIPSE { point: pt(col_r + 12.0, top_c + 60.0), radiusX: 2.8, radiusY: 2.8 };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.13, g: 0.87, b: 0.50, a: 0.95 * alpha });
-            self.d2d_context.FillEllipse(&dot_g, &self.brush_accent);
+            if let Some(meeting) = &island.calendar.soon_meeting {
+                // Meeting alert banner with [Join] button
+                let dot_m = D2D1_ELLIPSE { point: pt(col_r + 12.0, top_c + 60.0), radiusX: 3.0, radiusY: 3.0 };
+                self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.0, g: 0.75, b: 1.0, a: 0.95 * alpha });
+                self.d2d_context.FillEllipse(&dot_m, &self.brush_accent);
 
-            let sum_txt = "3 tasks today".encode_utf16().collect::<Vec<u16>>();
-            let st_rect = D2D_RECT_F { left: col_r + 20.0, top: top_c + 53.0, right: right_c - 6.0, bottom: top_c + 67.0 };
-            self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 * alpha });
-            self.d2d_context.DrawText(&sum_txt, &self.format_title, &st_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                let m_title = if meeting.title.len() > 16 {
+                    format!("{}...", &meeting.title[..15])
+                } else {
+                    meeting.title.clone()
+                };
+                let m_title_utf: Vec<u16> = m_title.encode_utf16().collect();
+                let mt_rect = D2D_RECT_F { left: col_r + 20.0, top: top_c + 53.0, right: right_c - 46.0, bottom: top_c + 67.0 };
+                self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 * alpha });
+                self.d2d_context.DrawText(&m_title_utf, &self.format_title, &mt_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 
-            let next_txt = "Next: Weekly sync, 11:00".encode_utf16().collect::<Vec<u16>>();
-            let nt_rect = D2D_RECT_F { left: col_r + 20.0, top: top_c + 67.0, right: right_c - 6.0, bottom: top_c + 81.0 };
-            self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.60, g: 0.63, b: 0.70, a: 0.85 * alpha });
-            self.d2d_context.DrawText(&next_txt, &self.format_date, &nt_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                let mins_until = (meeting.start - now_epoch) / 60;
+                let time_str = if mins_until <= 0 {
+                    "Now".to_string()
+                } else {
+                    format!("Starts in {}m", mins_until)
+                };
+                let time_utf: Vec<u16> = time_str.encode_utf16().collect();
+                let mtime_rect = D2D_RECT_F { left: col_r + 20.0, top: top_c + 67.0, right: right_c - 46.0, bottom: top_c + 81.0 };
+                self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.40, g: 0.80, b: 1.0, a: 0.90 * alpha });
+                self.d2d_context.DrawText(&time_utf, &self.format_date, &mtime_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+
+                // [Join] pill button on the right
+                let join_btn = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F { left: right_c - 42.0, top: top_c + 56.0, right: right_c - 6.0, bottom: top_c + 78.0 },
+                    radiusX: 6.0,
+                    radiusY: 6.0,
+                };
+                self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 0.90 * alpha });
+                self.d2d_context.FillRoundedRectangle(&join_btn, &self.brush_accent);
+                let join_txt = "Join".encode_utf16().collect::<Vec<u16>>();
+                let jt_rect = D2D_RECT_F { left: right_c - 42.0, top: top_c + 59.0, right: right_c - 6.0, bottom: top_c + 75.0 };
+                self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 * alpha });
+                self.d2d_context.DrawText(&join_txt, &self.format_tag, &jt_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            } else {
+                // Task summary
+                let (completed, total) = island.tasks.stats();
+                let dot_g = D2D1_ELLIPSE { point: pt(col_r + 12.0, top_c + 60.0), radiusX: 2.8, radiusY: 2.8 };
+                self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.13, g: 0.87, b: 0.50, a: 0.95 * alpha });
+                self.d2d_context.FillEllipse(&dot_g, &self.brush_accent);
+
+                let sum_str = format!("{} / {} tasks today", completed, total);
+                let sum_txt = sum_str.encode_utf16().collect::<Vec<u16>>();
+                let st_rect = D2D_RECT_F { left: col_r + 20.0, top: top_c + 53.0, right: right_c - 6.0, bottom: top_c + 67.0 };
+                self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 * alpha });
+                self.d2d_context.DrawText(&sum_txt, &self.format_title, &st_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+
+                let next_task_str = if let Some(first_pending) = island.tasks.next_pending_task() {
+                    format!("Next: {}, {}", first_pending.title, first_pending.time_range)
+                } else if !island.tasks.data.tasks.is_empty() {
+                    "All tasks completed!".to_string()
+                } else {
+                    "No pending tasks".to_string()
+                };
+                let next_txt = next_task_str.encode_utf16().collect::<Vec<u16>>();
+                let nt_rect = D2D_RECT_F { left: col_r + 20.0, top: top_c + 67.0, right: right_c - 6.0, bottom: top_c + 81.0 };
+                self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.60, g: 0.63, b: 0.70, a: 0.85 * alpha });
+                self.d2d_context.DrawText(&next_txt, &self.format_date, &nt_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            }
         }
     }
 
     fn draw_card_todolist(
         &self,
-        _island: &Island,
+        island: &Island,
         left: f32,
         top: f32,
         right: f32,
@@ -1550,14 +1625,14 @@ impl Renderer {
         alpha: f32,
     ) {
         unsafe {
-            let cx = (left + right) * 0.5;
-            let _ = cx;
             let top_c = top + 26.0;
             let col_l = left + 44.0;
             let right_c = right - 44.0;
 
-            // --- Left Column: 3/5 stat, calendar badge, Thu 5 Nov, (+) Add Task, (✎) Edit Task (Matching 02_todolist_planner.jpg) ---
-            let count_txt = "3/5".encode_utf16().collect::<Vec<u16>>();
+            // --- Left Column: Stats, localized date, [+] Add Task, [Week/Month] View toggle ---
+            let (completed, total) = island.tasks.stats();
+            let count_str = format!("{}/{}", completed, total);
+            let count_txt = count_str.encode_utf16().collect::<Vec<u16>>();
             let c_rect = D2D_RECT_F { left: col_l, top: top_c + 1.0, right: col_l + 54.0, bottom: top_c + 32.0 };
             self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 * alpha });
             self.d2d_context.DrawText(&count_txt, &self.format_display, &c_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
@@ -1569,23 +1644,31 @@ impl Renderer {
             let green_color = D2D1_COLOR_F { r: 0.13, g: 0.87, b: 0.50, a: 0.95 * alpha };
             self.draw_vector_calendar_icon(col_l + 65.0, top_c + 16.0, 0.75, &green_color);
 
-            let st = windows::Win32::System::SystemInformation::GetLocalTime();
+            let (_now_epoch, _off, y, m, d, _wday, h, mi) = crate::calendar::current_local_time();
+            let (y, m, d) = (y as i64, m as i64, d as i64);
+            let now_sec = (h as u32) * 3600 + (mi as u32) * 60;
+            let day_num = crate::calendar::days_from_civil(y, m, d);
+            let wday = crate::calendar::weekday(day_num) as usize;
             let day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-            let day_idx = (st.wDayOfWeek as usize).min(6);
             let month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-            let month_idx = (st.wMonth.saturating_sub(1) as usize).min(11);
-            let date_txt = format!("{}, {} {:02}", day_names[day_idx], month_names[month_idx], st.wDay).encode_utf16().collect::<Vec<u16>>();
-            let d_rect = D2D_RECT_F { left: col_l, top: top_c + 32.0, right: col_l + 110.0, bottom: top_c + 46.0 };
+            let m_idx = (m.saturating_sub(1) as usize).min(11);
+            let date_txt = format!("{}, {} {:02}", day_names[wday], month_names[m_idx], d).encode_utf16().collect::<Vec<u16>>();
+            let d_rect = D2D_RECT_F { left: col_l, top: top_c + 32.0, right: col_l + 130.0, bottom: top_c + 46.0 };
             self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.60, g: 0.63, b: 0.70, a: 0.85 * alpha });
             self.d2d_context.DrawText(&date_txt, &self.format_date, &d_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-            // Pill Button 1: (+) Add Task (Matching 02_todolist_planner.jpg)
+            // Pill Button 1: (+) Add Task
             let btn_add = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F { left: col_l, top: top_c + 54.0, right: col_l + 68.0, bottom: top_c + 76.0 },
                 radiusX: 11.0,
                 radiusY: 11.0,
             };
-            self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.12 * alpha });
+            let add_bg = if island.entering_task.is_some() {
+                D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 0.35 * alpha }
+            } else {
+                D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.12 * alpha }
+            };
+            self.brush_btn_bg.SetColor(&add_bg);
             self.d2d_context.FillRoundedRectangle(&btn_add, &self.brush_btn_bg);
             let white_btn_color = D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 * alpha };
             self.draw_vector_plus_circle(col_l + 10.0, top_c + 65.0, 0.70, &white_btn_color);
@@ -1594,19 +1677,24 @@ impl Renderer {
             self.brush_white.SetColor(&white_btn_color);
             self.d2d_context.DrawText(&add_txt, &self.format_tag, &at_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-            // Pill Button 2: (✎) Edit Task
-            let btn_edit = D2D1_ROUNDED_RECT {
+            // Pill Button 2: (🗓) View Toggle [Week | Month]
+            let btn_view = D2D1_ROUNDED_RECT {
                 rect: D2D_RECT_F { left: col_l + 74.0, top: top_c + 54.0, right: col_l + 142.0, bottom: top_c + 76.0 },
                 radiusX: 11.0,
                 radiusY: 11.0,
             };
-            self.d2d_context.FillRoundedRectangle(&btn_edit, &self.brush_btn_bg);
-            self.draw_vector_pencil(col_l + 84.0, top_c + 65.0, 0.75, &white_btn_color);
-            let edit_txt = "Edit Task".encode_utf16().collect::<Vec<u16>>();
-            let et_rect = D2D_RECT_F { left: col_l + 93.0, top: top_c + 56.0, right: col_l + 140.0, bottom: top_c + 74.0 };
-            self.d2d_context.DrawText(&edit_txt, &self.format_tag, &et_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.12 * alpha });
+            self.d2d_context.FillRoundedRectangle(&btn_view, &self.brush_btn_bg);
+            self.draw_vector_calendar_icon(col_l + 84.0, top_c + 65.0, 0.70, &white_btn_color);
+            let view_label = match island.tasks.data.view {
+                crate::tasks::CalendarView::Week => "Week View",
+                crate::tasks::CalendarView::Month => "Month View",
+            };
+            let vt_utf: Vec<u16> = view_label.encode_utf16().collect();
+            let vt_rect = D2D_RECT_F { left: col_l + 93.0, top: top_c + 56.0, right: col_l + 140.0, bottom: top_c + 74.0 };
+            self.d2d_context.DrawText(&vt_utf, &self.format_tag, &vt_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-            // --- Middle Column: Interactive Tasks Container (Matching 02_todolist_planner.jpg) ---
+            // --- Middle Column: Interactive Tasks Container ---
             let mid_left = col_l + 152.0;
             let mid_w = 142.0;
             let box_rect = D2D1_ROUNDED_RECT {
@@ -1617,57 +1705,104 @@ impl Renderer {
             self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.05 * alpha });
             self.d2d_context.FillRoundedRectangle(&box_rect, &self.brush_btn_bg);
 
-            // Task 1: Unchecked blue circle ring + "Design review" + "11:00-13:00"
-            let chk1 = D2D1_ELLIPSE { point: pt(mid_left + 12.0, top_c + 13.0), radiusX: 5.2, radiusY: 5.2 };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 0.95 * alpha });
-            self.d2d_context.DrawEllipse(&chk1, &self.brush_accent, 1.4, None);
-            let t1_txt = "Design review".encode_utf16().collect::<Vec<u16>>();
-            let t1_rect = D2D_RECT_F { left: mid_left + 22.0, top: top_c + 5.0, right: mid_left + mid_w - 6.0, bottom: top_c + 17.0 };
-            self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 * alpha });
-            self.d2d_context.DrawText(&t1_txt, &self.format_body, &t1_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
-            let t1_sub = "11:00–13:00".encode_utf16().collect::<Vec<u16>>();
-            let t1s_rect = D2D_RECT_F { left: mid_left + 22.0, top: top_c + 16.0, right: mid_left + mid_w - 6.0, bottom: top_c + 27.0 };
-            self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.50, g: 0.53, b: 0.60, a: 0.80 * alpha });
-            self.d2d_context.DrawText(&t1_sub, &self.format_tag, &t1s_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            // If entering a task, show inline input box with blinking caret!
+            if let Some(buf) = &island.entering_task {
+                let caret = if (island.caret_timer * 2.0).fract() < 0.5 { "│" } else { " " };
+                let input_str = if buf.is_empty() {
+                    format!("New task...{}", caret)
+                } else {
+                    format!("{}{}", buf, caret)
+                };
+                let in_pill = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F { left: mid_left + 4.0, top: top_c + 4.0, right: mid_left + mid_w - 4.0, bottom: top_c + 28.0 },
+                    radiusX: 5.0,
+                    radiusY: 5.0,
+                };
+                self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 0.20 * alpha });
+                self.d2d_context.FillRoundedRectangle(&in_pill, &self.brush_accent);
 
-            // Task 2: Dark green pill + green checkmark + "Weekly update"
-            let p2_rect = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F { left: mid_left + 4.0, top: top_c + 32.0, right: mid_left + mid_w - 6.0, bottom: top_c + 54.0 },
-                radiusX: 6.0,
-                radiusY: 6.0,
-            };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.08, g: 0.20, b: 0.12, a: 0.90 * alpha });
-            self.d2d_context.FillRoundedRectangle(&p2_rect, &self.brush_accent);
-            let chk2 = D2D1_ELLIPSE { point: pt(mid_left + 14.0, top_c + 43.0), radiusX: 5.2, radiusY: 5.2 };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.13, g: 0.87, b: 0.50, a: 0.95 * alpha });
-            self.d2d_context.FillEllipse(&chk2, &self.brush_accent);
-            self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 * alpha });
-            self.d2d_context.DrawLine(pt(mid_left + 11.8, top_c + 43.0), pt(mid_left + 13.5, top_c + 45.0), &self.brush_white, 1.2, None);
-            self.d2d_context.DrawLine(pt(mid_left + 13.5, top_c + 45.0), pt(mid_left + 16.5, top_c + 41.0), &self.brush_white, 1.2, None);
-            let t2_txt = "Weekly update".encode_utf16().collect::<Vec<u16>>();
-            let t2_rect = D2D_RECT_F { left: mid_left + 24.0, top: top_c + 36.0, right: mid_left + mid_w - 8.0, bottom: top_c + 50.0 };
-            self.d2d_context.DrawText(&t2_txt, &self.format_body, &t2_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                let in_utf: Vec<u16> = input_str.encode_utf16().collect();
+                let in_rect = D2D_RECT_F { left: mid_left + 10.0, top: top_c + 7.0, right: mid_left + mid_w - 6.0, bottom: top_c + 25.0 };
+                self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 * alpha });
+                self.d2d_context.DrawText(&in_utf, &self.format_body, &in_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 
-            // Task 3: Dark green pill + blue checkmark + "Reply to Dina"
-            let p3_rect = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F { left: mid_left + 4.0, top: top_c + 58.0, right: mid_left + mid_w - 6.0, bottom: top_c + 80.0 },
-                radiusX: 6.0,
-                radiusY: 6.0,
-            };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.08, g: 0.20, b: 0.12, a: 0.90 * alpha });
-            self.d2d_context.FillRoundedRectangle(&p3_rect, &self.brush_accent);
-            let chk3 = D2D1_ELLIPSE { point: pt(mid_left + 14.0, top_c + 69.0), radiusX: 5.2, radiusY: 5.2 };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 0.95 * alpha });
-            self.d2d_context.FillEllipse(&chk3, &self.brush_accent);
-            self.d2d_context.DrawLine(pt(mid_left + 11.8, top_c + 69.0), pt(mid_left + 13.5, top_c + 71.0), &self.brush_white, 1.2, None);
-            self.d2d_context.DrawLine(pt(mid_left + 13.5, top_c + 71.0), pt(mid_left + 16.5, top_c + 67.0), &self.brush_white, 1.2, None);
-            let t3_txt = "Reply to Dina".encode_utf16().collect::<Vec<u16>>();
-            let t3_rect = D2D_RECT_F { left: mid_left + 24.0, top: top_c + 62.0, right: mid_left + mid_w - 8.0, bottom: top_c + 76.0 };
-            self.d2d_context.DrawText(&t3_txt, &self.format_body, &t3_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                let hint_utf: Vec<u16> = "Press Enter to save, Esc to cancel".encode_utf16().collect();
+                let hint_rect = D2D_RECT_F { left: mid_left + 6.0, top: top_c + 36.0, right: mid_left + mid_w - 6.0, bottom: top_c + 50.0 };
+                self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.55, g: 0.58, b: 0.65, a: 0.75 * alpha });
+                self.d2d_context.DrawText(&hint_utf, &self.format_pill_tag, &hint_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            } else {
+                // Normal task rendering (up to 3 items)
+                let display_tasks = island.tasks.data.tasks.iter().take(3);
+                for (idx, task) in display_tasks.enumerate() {
+                    let row_y = top_c + 3.0 + (idx as f32) * 26.5;
+                    let row_cy = row_y + 11.0;
 
-            // --- Right Column: November 2026 Calendar & Timeline Bar (Matching 02_todolist_planner.jpg) ---
+                    let (cat_r, cat_g, cat_b) = match task.category {
+                        0 => (0.0, 0.48, 1.0),   // Meeting: Blue
+                        1 => (0.13, 0.87, 0.50), // Task: Green
+                        2 => (0.95, 0.25, 0.30), // Deadline: Red
+                        _ => (1.0, 0.65, 0.15),  // Event: Amber
+                    };
+
+                    let chk = D2D1_ELLIPSE { point: pt(mid_left + 12.0, row_cy), radiusX: 5.2, radiusY: 5.2 };
+
+                    if task.completed {
+                        // Background row pill for completed
+                        let p_rect = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: mid_left + 4.0, top: row_y, right: mid_left + mid_w - 6.0, bottom: row_y + 24.0 },
+                            radiusX: 6.0,
+                            radiusY: 6.0,
+                        };
+                        self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.08, g: 0.20, b: 0.12, a: 0.70 * alpha });
+                        self.d2d_context.FillRoundedRectangle(&p_rect, &self.brush_accent);
+
+                        // Checkmark inside filled circle
+                        self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.13, g: 0.87, b: 0.50, a: 0.95 * alpha });
+                        self.d2d_context.FillEllipse(&chk, &self.brush_accent);
+                        self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 * alpha });
+                        self.d2d_context.DrawLine(pt(mid_left + 9.8, row_cy), pt(mid_left + 11.5, row_cy + 2.0), &self.brush_white, 1.2, None);
+                        self.d2d_context.DrawLine(pt(mid_left + 11.5, row_cy + 2.0), pt(mid_left + 14.5, row_cy - 2.0), &self.brush_white, 1.2, None);
+
+                        // Text with strikethrough
+                        let t_utf: Vec<u16> = task.title.encode_utf16().collect();
+                        let t_rect = D2D_RECT_F { left: mid_left + 22.0, top: row_y + 2.0, right: mid_left + mid_w - 20.0, bottom: row_y + 15.0 };
+                        self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.55, g: 0.58, b: 0.65, a: 0.70 * alpha });
+                        self.d2d_context.DrawText(&t_utf, &self.format_body, &t_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                        // Strikethrough line
+                        self.d2d_context.DrawLine(pt(mid_left + 22.0, row_cy - 1.0), pt(mid_left + mid_w - 26.0, row_cy - 1.0), &self.brush_subtext, 1.0, None);
+                    } else {
+                        // Uncompleted: category outline ring
+                        self.brush_accent.SetColor(&D2D1_COLOR_F { r: cat_r, g: cat_g, b: cat_b, a: 0.95 * alpha });
+                        self.d2d_context.DrawEllipse(&chk, &self.brush_accent, 1.4, None);
+
+                        let t_utf: Vec<u16> = task.title.encode_utf16().collect();
+                        let t_rect = D2D_RECT_F { left: mid_left + 22.0, top: row_y + 1.0, right: mid_left + mid_w - 20.0, bottom: row_y + 13.0 };
+                        self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 * alpha });
+                        self.d2d_context.DrawText(&t_utf, &self.format_body, &t_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let sub_utf: Vec<u16> = task.time_range.encode_utf16().collect();
+                        let sub_rect = D2D_RECT_F { left: mid_left + 22.0, top: row_y + 12.0, right: mid_left + mid_w - 20.0, bottom: row_y + 23.0 };
+                        self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.50, g: 0.53, b: 0.60, a: 0.80 * alpha });
+                        self.d2d_context.DrawText(&sub_utf, &self.format_tag, &sub_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                    }
+
+                    // Delete X icon on far right of task row
+                    let x_cx = mid_left + mid_w - 12.0;
+                    self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.50, g: 0.53, b: 0.60, a: 0.40 * alpha });
+                    self.d2d_context.DrawLine(pt(x_cx - 2.5, row_cy - 2.5), pt(x_cx + 2.5, row_cy + 2.5), &self.brush_subtext, 1.1, None);
+                    self.d2d_context.DrawLine(pt(x_cx + 2.5, row_cy - 2.5), pt(x_cx - 2.5, row_cy + 2.5), &self.brush_subtext, 1.1, None);
+                }
+            }
+
+            // --- Right Column: Real Dynamic Calendar & Timeline Bar ---
             let r_start = mid_left + mid_w + 14.0;
-            let m_label = "November 2026".encode_utf16().collect::<Vec<u16>>();
+            let cal2_w = right_c - r_start;
+
+            let display_month = ((m - 1 + island.tasks.data.month_offset as i64).rem_euclid(12) + 1) as u32;
+            let display_year = (y as i32) + ((m - 1 + island.tasks.data.month_offset as i64).div_euclid(12)) as i32;
+            let full_month_names = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+            let m_label_str = format!("{} {}", full_month_names[(display_month - 1) as usize], display_year);
+            let m_label = m_label_str.encode_utf16().collect::<Vec<u16>>();
             let ml_rect = D2D_RECT_F { left: r_start, top: top_c + 1.0, right: right_c - 20.0, bottom: top_c + 14.0 };
             self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.95 * alpha });
             self.d2d_context.DrawText(&m_label, &self.format_tag, &ml_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
@@ -1680,59 +1815,114 @@ impl Renderer {
             self.d2d_context.DrawLine(pt(right_c - 8.0, chev_m_y - 3.0), pt(right_c - 5.0, chev_m_y), &self.brush_subtext, 1.1, None);
             self.d2d_context.DrawLine(pt(right_c - 5.0, chev_m_y), pt(right_c - 8.0, chev_m_y + 3.0), &self.brush_subtext, 1.1, None);
 
-            // Days S M T W T F S
-            let cal2_w = right_c - r_start;
-            let c2_step = cal2_w / 7.0;
-            let s_days = ["S", "M", "T", "W", "T", "F", "S"];
-            for (i, d) in s_days.iter().enumerate() {
-                let dx = r_start + (i as f32 + 0.5) * c2_step;
-                let d_utf = d.encode_utf16().collect::<Vec<u16>>();
-                let d_rect = D2D_RECT_F { left: dx - 8.0, top: top_c + 17.0, right: dx + 8.0, bottom: top_c + 28.0 };
-                self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.50, g: 0.53, b: 0.60, a: 0.80 * alpha });
-                self.d2d_context.DrawText(&d_utf, &self.format_tag, &d_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            match island.tasks.data.view {
+                crate::tasks::CalendarView::Week => {
+                    // Days S M T W T F S
+                    let c2_step = cal2_w / 7.0;
+                    let s_days = ["S", "M", "T", "W", "T", "F", "S"];
+                    let today_day_num = crate::calendar::days_from_civil(y, m, d);
+                    let today_wday = crate::calendar::weekday(today_day_num); // 0=Sun .. 6=Sat
 
-                let date_num = format!("{}", i + 1);
-                let dn_utf = date_num.encode_utf16().collect::<Vec<u16>>();
-                let dn_cy = top_c + 38.0;
+                    for (i, day_sym) in s_days.iter().enumerate() {
+                        let dx = r_start + (i as f32 + 0.5) * c2_step;
+                        let d_utf = day_sym.encode_utf16().collect::<Vec<u16>>();
+                        let d_rect = D2D_RECT_F { left: dx - 8.0, top: top_c + 17.0, right: dx + 8.0, bottom: top_c + 28.0 };
+                        self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.50, g: 0.53, b: 0.60, a: 0.80 * alpha });
+                        self.d2d_context.DrawText(&d_utf, &self.format_tag, &d_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-                if i == 4 { // Active day 5 (green highlight circle)
-                    let active_c = D2D1_ELLIPSE { point: pt(dx, dn_cy), radiusX: 7.8, radiusY: 7.8 };
-                    self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.13, g: 0.87, b: 0.50, a: 0.95 * alpha });
-                    self.d2d_context.FillEllipse(&active_c, &self.brush_accent);
-                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 * alpha });
-                    // Category dots under active day
-                    let d1 = D2D1_ELLIPSE { point: pt(dx - 2.5, dn_cy + 10.5), radiusX: 1.3, radiusY: 1.3 };
-                    let d2 = D2D1_ELLIPSE { point: pt(dx + 2.5, dn_cy + 10.5), radiusX: 1.3, radiusY: 1.3 };
+                        let target_day_num = today_day_num - today_wday + i as i64;
+                        let (_, _, day_val) = crate::calendar::civil_from_days(target_day_num);
+                        let date_num = format!("{}", day_val);
+                        let dn_utf = date_num.encode_utf16().collect::<Vec<u16>>();
+                        let dn_cy = top_c + 38.0;
+
+                        if i as i64 == today_wday && island.tasks.data.month_offset == 0 {
+                            let active_c = D2D1_ELLIPSE { point: pt(dx, dn_cy), radiusX: 7.8, radiusY: 7.8 };
+                            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.13, g: 0.87, b: 0.50, a: 0.95 * alpha });
+                            self.d2d_context.FillEllipse(&active_c, &self.brush_accent);
+                            self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 * alpha });
+                            // Category dots
+                            let d1 = D2D1_ELLIPSE { point: pt(dx - 2.5, dn_cy + 10.5), radiusX: 1.3, radiusY: 1.3 };
+                            let d2 = D2D1_ELLIPSE { point: pt(dx + 2.5, dn_cy + 10.5), radiusX: 1.3, radiusY: 1.3 };
+                            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 0.95 * alpha });
+                            self.d2d_context.FillEllipse(&d1, &self.brush_accent);
+                            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.13, g: 0.87, b: 0.50, a: 0.95 * alpha });
+                            self.d2d_context.FillEllipse(&d2, &self.brush_accent);
+                        } else {
+                            self.brush_white.SetColor(&D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.92, a: 0.85 * alpha });
+                        }
+                        let dn_rect = D2D_RECT_F { left: dx - 8.0, top: dn_cy - 6.0, right: dx + 8.0, bottom: dn_cy + 6.0 };
+                        self.d2d_context.DrawText(&dn_utf, &self.format_tag, &dn_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    }
+
+                    // Timeline bar: 00   06   12   18   24 + current time indicator
+                    let tl_y = top_c + 70.0;
+                    let times = ["00", "06", "12", "18", "24"];
+                    let t_step = cal2_w / 4.0;
+                    for (i, t_str) in times.iter().enumerate() {
+                        let tx = r_start + (i as f32) * t_step;
+                        let t_utf = t_str.encode_utf16().collect::<Vec<u16>>();
+                        let tr = D2D_RECT_F { left: tx - 8.0, top: tl_y, right: tx + 8.0, bottom: tl_y + 11.0 };
+                        self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.45, g: 0.48, b: 0.55, a: 0.75 * alpha });
+                        self.d2d_context.DrawText(&t_utf, &self.format_tag, &tr as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    }
+
+                    // Dynamic current hour indicator pill
+                    let time_ratio = (now_sec as f32 / 86400.0).clamp(0.0, 1.0);
+                    let ev_x = r_start + time_ratio * cal2_w;
+                    let ev_pill = D2D1_ROUNDED_RECT {
+                        rect: D2D_RECT_F { left: ev_x - 6.0, top: tl_y - 6.0, right: ev_x + 6.0, bottom: tl_y - 2.0 },
+                        radiusX: 2.0,
+                        radiusY: 2.0,
+                    };
                     self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 0.95 * alpha });
-                    self.d2d_context.FillEllipse(&d1, &self.brush_accent);
-                    self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.13, g: 0.87, b: 0.50, a: 0.95 * alpha });
-                    self.d2d_context.FillEllipse(&d2, &self.brush_accent);
-                } else {
-                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.92, a: 0.85 * alpha });
+                    self.d2d_context.FillRoundedRectangle(&ev_pill, &self.brush_accent);
                 }
-                let dn_rect = D2D_RECT_F { left: dx - 8.0, top: dn_cy - 6.0, right: dx + 8.0, bottom: dn_cy + 6.0 };
-                self.d2d_context.DrawText(&dn_utf, &self.format_tag, &dn_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            }
+                crate::tasks::CalendarView::Month => {
+                    // Compact Monthly Grid!
+                    let first_w = crate::calendar::first_of_month(display_year, display_month) as usize; // 0=Sun .. 6=Sat
+                    let total_days = crate::calendar::days_in_month(display_year, display_month);
+                    let col_step = cal2_w / 7.0;
+                    let s_days = ["S", "M", "T", "W", "T", "F", "S"];
 
-            // Timeline bar: 00   06   12   18   24 + event pill at 12 (Matching 02_todolist_planner.jpg)
-            let tl_y = top_c + 70.0;
-            let times = ["00", "06", "12", "18", "24"];
-            let t_step = cal2_w / 4.0;
-            for (i, t_str) in times.iter().enumerate() {
-                let tx = r_start + (i as f32) * t_step;
-                let t_utf = t_str.encode_utf16().collect::<Vec<u16>>();
-                let tr = D2D_RECT_F { left: tx - 8.0, top: tl_y, right: tx + 8.0, bottom: tl_y + 11.0 };
-                self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.45, g: 0.48, b: 0.55, a: 0.75 * alpha });
-                self.d2d_context.DrawText(&t_utf, &self.format_tag, &tr as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    // Header row
+                    for (i, day_sym) in s_days.iter().enumerate() {
+                        let dx = r_start + (i as f32 + 0.5) * col_step;
+                        let d_utf = day_sym.encode_utf16().collect::<Vec<u16>>();
+                        let d_rect = D2D_RECT_F { left: dx - 6.0, top: top_c + 15.0, right: dx + 6.0, bottom: top_c + 24.0 };
+                        self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.45, g: 0.48, b: 0.55, a: 0.75 * alpha });
+                        self.d2d_context.DrawText(&d_utf, &self.format_pill_tag, &d_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    }
+
+                    // Month cells
+                    let row_h = 10.5;
+                    let grid_top = top_c + 25.0;
+                    for day_val in 1..=total_days {
+                        let slot = first_w + (day_val as usize - 1);
+                        let col = slot % 7;
+                        let row = slot / 7;
+                        if row >= 5 {
+                            break; // Fit nicely in card
+                        }
+                        let dx = r_start + (col as f32 + 0.5) * col_step;
+                        let dy = grid_top + (row as f32) * row_h;
+
+                        let is_today = island.tasks.data.month_offset == 0 && day_val == d as u32;
+                        if is_today {
+                            let hl = D2D1_ELLIPSE { point: pt(dx, dy + 5.0), radiusX: 5.5, radiusY: 5.5 };
+                            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.13, g: 0.87, b: 0.50, a: 0.95 * alpha });
+                            self.d2d_context.FillEllipse(&hl, &self.brush_accent);
+                            self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 * alpha });
+                        } else {
+                            self.brush_white.SetColor(&D2D1_COLOR_F { r: 0.75, g: 0.78, b: 0.85, a: 0.80 * alpha });
+                        }
+                        let num_str = format!("{}", day_val);
+                        let num_utf: Vec<u16> = num_str.encode_utf16().collect();
+                        let nr = D2D_RECT_F { left: dx - 6.0, top: dy, right: dx + 6.0, bottom: dy + 10.0 };
+                        self.d2d_context.DrawText(&num_utf, &self.format_pill_tag, &nr as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    }
+                }
             }
-            // Event pill at 12:00
-            let ev_pill = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F { left: r_start + 2.0 * t_step - 6.0, top: tl_y - 6.0, right: r_start + 2.0 * t_step + 6.0, bottom: tl_y - 2.0 },
-                radiusX: 2.0,
-                radiusY: 2.0,
-            };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 0.95 * alpha });
-            self.d2d_context.FillRoundedRectangle(&ev_pill, &self.brush_accent);
         }
     }
 
@@ -1775,6 +1965,7 @@ impl Renderer {
         }
     }
 
+    #[allow(dead_code)]
     fn draw_vector_pencil(&self, cx: f32, cy: f32, scale: f32, color: &D2D1_COLOR_F) {
         unsafe {
             self.brush_accent.SetColor(color);
@@ -1895,6 +2086,69 @@ impl Renderer {
             let dot2 = D2D1_ELLIPSE { point: pt(cx + 3.0, cy - 1.0), radiusX: 1.1, radiusY: 1.1 };
             self.d2d_context.FillEllipse(&dot1, &self.brush_accent);
             self.d2d_context.FillEllipse(&dot2, &self.brush_accent);
+        }
+    }
+
+    fn draw_vector_location_pin(&self, cx: f32, cy: f32, scale: f32, color: &D2D1_COLOR_F) {
+        unsafe {
+            self.brush_accent.SetColor(color);
+            let head = D2D1_ELLIPSE { point: pt(cx, cy - 1.5 * scale), radiusX: 3.2 * scale, radiusY: 3.2 * scale };
+            self.d2d_context.DrawEllipse(&head, &self.brush_accent, 1.2 * scale, None);
+            let inner = D2D1_ELLIPSE { point: pt(cx, cy - 1.5 * scale), radiusX: 1.1 * scale, radiusY: 1.1 * scale };
+            self.d2d_context.FillEllipse(&inner, &self.brush_accent);
+            self.d2d_context.DrawLine(pt(cx - 2.2 * scale, cy - 0.2 * scale), pt(cx, cy + 3.8 * scale), &self.brush_accent, 1.2 * scale, None);
+            self.d2d_context.DrawLine(pt(cx + 2.2 * scale, cy - 0.2 * scale), pt(cx, cy + 3.8 * scale), &self.brush_accent, 1.2 * scale, None);
+        }
+    }
+
+    fn draw_vector_sun(&self, cx: f32, cy: f32, scale: f32, color: &D2D1_COLOR_F) {
+        unsafe {
+            self.brush_accent.SetColor(color);
+            let disc = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 2.8 * scale, radiusY: 2.8 * scale };
+            self.d2d_context.FillEllipse(&disc, &self.brush_accent);
+            let r1 = 3.8 * scale;
+            let r2 = 5.2 * scale;
+            let ray_dirs = [
+                (0.0, -1.0), (0.707, -0.707), (1.0, 0.0), (0.707, 0.707),
+                (0.0, 1.0), (-0.707, 0.707), (-1.0, 0.0), (-0.707, -0.707),
+            ];
+            for (dx, dy) in ray_dirs {
+                self.d2d_context.DrawLine(
+                    pt(cx + dx * r1, cy + dy * r1),
+                    pt(cx + dx * r2, cy + dy * r2),
+                    &self.brush_accent,
+                    1.1 * scale,
+                    None,
+                );
+            }
+        }
+    }
+
+    fn draw_vector_crescent_moon(&self, cx: f32, cy: f32, scale: f32, color: &D2D1_COLOR_F) {
+        unsafe {
+            self.brush_accent.SetColor(color);
+            if let Ok(path) = self.d2d_factory.CreatePathGeometry() {
+                if let Ok(sink) = path.Open() {
+                    sink.BeginFigure(pt(cx, cy - 4.5 * scale), D2D1_FIGURE_BEGIN_FILLED);
+                    sink.AddArc(&D2D1_ARC_SEGMENT {
+                        point: pt(cx, cy + 4.5 * scale),
+                        size: D2D_SIZE_F { width: 4.5 * scale, height: 4.5 * scale },
+                        rotationAngle: 0.0,
+                        sweepDirection: D2D1_SWEEP_DIRECTION_CLOCKWISE,
+                        arcSize: D2D1_ARC_SIZE_SMALL,
+                    });
+                    sink.AddArc(&D2D1_ARC_SEGMENT {
+                        point: pt(cx, cy - 4.5 * scale),
+                        size: D2D_SIZE_F { width: 3.2 * scale, height: 4.0 * scale },
+                        rotationAngle: 0.0,
+                        sweepDirection: D2D1_SWEEP_DIRECTION_COUNTER_CLOCKWISE,
+                        arcSize: D2D1_ARC_SIZE_SMALL,
+                    });
+                    sink.EndFigure(D2D1_FIGURE_END_CLOSED);
+                    let _ = sink.Close();
+                    self.d2d_context.FillGeometry(&path, &self.brush_accent, None);
+                }
+            }
         }
     }
 
@@ -2231,27 +2485,56 @@ impl Renderer {
                 self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.38, g: 0.78, b: 1.0, a: 0.85 * alpha });
                 self.d2d_context.DrawText(&lyr_label, &self.format_tag, &ll_rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 
-                // Quick Romaji Toggle Pill [A / あ] (col_r + 84.0 .. col_r + 130.0, top_c + 1.0 .. top_c + 15.0)
+                // Quick Romaji Toggle Pill [A / あ] (col_r + 80.0 .. col_r + 128.0, top_c .. top_c + 16.0)
                 let rom_pill = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F { left: col_r + 84.0, top: top_c + 1.0, right: col_r + 128.0, bottom: top_c + 14.0 },
-                    radiusX: 3.5,
-                    radiusY: 3.5,
+                    rect: D2D_RECT_F { left: col_r + 80.0, top: top_c, right: col_r + 128.0, bottom: top_c + 16.0 },
+                    radiusX: 4.0,
+                    radiusY: 4.0,
                 };
                 if island.romanize_cjk_lyrics {
-                    self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.38, g: 0.78, b: 1.0, a: 0.28 * alpha });
+                    self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.38, g: 0.78, b: 1.0, a: 0.25 * alpha });
                     self.d2d_context.FillRoundedRectangle(&rom_pill, &self.brush_accent);
-                    self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.50, g: 0.88, b: 1.0, a: 0.85 * alpha });
+                    self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.50, g: 0.88, b: 1.0, a: 0.90 * alpha });
                     self.d2d_context.DrawRoundedRectangle(&rom_pill, &self.brush_accent, 1.0, None);
                     let rom_txt = "A / あ".encode_utf16().collect::<Vec<u16>>();
-                    let rt_rect = D2D_RECT_F { left: col_r + 86.0, top: top_c + 2.0, right: col_r + 126.0, bottom: top_c + 14.0 };
-                    self.d2d_context.DrawText(&rom_txt, &self.format_tag, &rt_rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                    self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.55, g: 0.90, b: 1.0, a: 0.95 * alpha });
+                    self.d2d_context.DrawText(&rom_txt, &self.format_pill_tag, &rom_pill.rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 } else {
-                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.18 * alpha });
+                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 * alpha });
+                    self.d2d_context.FillRoundedRectangle(&rom_pill, &self.brush_white);
+                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.25 * alpha });
                     self.d2d_context.DrawRoundedRectangle(&rom_pill, &self.brush_white, 1.0, None);
                     let rom_txt = "A / あ".encode_utf16().collect::<Vec<u16>>();
-                    let rt_rect = D2D_RECT_F { left: col_r + 86.0, top: top_c + 2.0, right: col_r + 126.0, bottom: top_c + 14.0 };
-                    self.brush_subtext.SetOpacity(0.55 * alpha);
-                    self.d2d_context.DrawText(&rom_txt, &self.format_tag, &rt_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                    self.brush_subtext.SetOpacity(0.70 * alpha);
+                    self.d2d_context.DrawText(&rom_txt, &self.format_pill_tag, &rom_pill.rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                }
+
+                // Candidate Switcher Pill [1/N Alt] or [Retry] (col_r + 134.0 .. col_r + 184.0, top_c .. top_c + 16.0)
+                let total_cand = island.lyrics_candidates.len();
+                let cand_label = if total_cand > 1 {
+                    format!("{}/{} Alt", island.active_candidate_idx + 1, total_cand)
+                } else {
+                    "Retry".to_string()
+                };
+                let cand_pill = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F { left: col_r + 134.0, top: top_c, right: col_r + 184.0, bottom: top_c + 16.0 },
+                    radiusX: 4.0,
+                    radiusY: 4.0,
+                };
+                self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 * alpha });
+                self.d2d_context.FillRoundedRectangle(&cand_pill, &self.brush_white);
+                if total_cand > 1 {
+                    self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.45, g: 0.78, b: 1.0, a: 0.40 * alpha });
+                    self.d2d_context.DrawRoundedRectangle(&cand_pill, &self.brush_accent, 1.0, None);
+                    let cand_txt = cand_label.encode_utf16().collect::<Vec<u16>>();
+                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 0.88, g: 0.92, b: 1.0, a: 0.90 * alpha });
+                    self.d2d_context.DrawText(&cand_txt, &self.format_pill_tag, &cand_pill.rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                } else {
+                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.25 * alpha });
+                    self.d2d_context.DrawRoundedRectangle(&cand_pill, &self.brush_white, 1.0, None);
+                    let cand_txt = cand_label.encode_utf16().collect::<Vec<u16>>();
+                    self.brush_subtext.SetOpacity(0.70 * alpha);
+                    self.d2d_context.DrawText(&cand_txt, &self.format_pill_tag, &cand_pill.rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 }
 
                 let (prev_line_opt, curr_line_str, next_line_opt, _line_progress, fade_alpha) = if let Some(ref lyrics) = island.current_lyrics {
@@ -2433,7 +2716,7 @@ impl Renderer {
 
     fn draw_card_prayer_times(
         &self,
-        _island: &Island,
+        island: &Island,
         left: f32,
         top: f32,
         right: f32,
@@ -2447,67 +2730,119 @@ impl Renderer {
             let col_r = cx + 12.0;
             let right_c = right - 44.0;
 
-            // Hairline vertical divider
+            // Hairline vertical divider between Left (Schedule) & Right (Arc)
             self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 * alpha });
             self.d2d_context.DrawLine(pt(cx, top_c + 4.0), pt(cx, top_c + 86.0), &self.brush_btn_bg, 1.0, None);
 
-            // Left Column: Next Prayer Countdown (Matching 04_prayer_times_arc.jpg)
-            let pray_label = "PRAYER TIMES • JAKARTA".encode_utf16().collect::<Vec<u16>>();
-            let pl_rect = D2D_RECT_F { left: col_l, top: top_c + 2.0, right: cx - 10.0, bottom: top_c + 15.0 };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.38, g: 0.78, b: 1.0, a: 0.85 * alpha });
-            self.d2d_context.DrawText(&pray_label, &self.format_tag, &pl_rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            let (pr, pg, pb) = island.prayer.prayer_color_rgb;
+            let prayer_theme_color = D2D1_COLOR_F { r: pr, g: pg, b: pb, a: 0.95 * alpha };
 
-            let next_sholat = "Maghrib".encode_utf16().collect::<Vec<u16>>();
-            let ns_rect = D2D_RECT_F { left: col_l, top: top_c + 14.0, right: cx - 10.0, bottom: top_c + 40.0 };
-            self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-            self.brush_white.SetOpacity(0.98 * alpha);
-            self.d2d_context.DrawText(&next_sholat, &self.format_display, &ns_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            // ==================== LEFT COLUMN: PRAYER SCHEDULE & COUNTDOWN ====================
+            // 1. Location Pin Icon & City Header
+            self.draw_vector_location_pin(col_l + 3.0, top_c + 7.5, 0.85, &prayer_theme_color);
 
-            let countdown = "17:48   in 1h 8m".encode_utf16().collect::<Vec<u16>>();
+            let city_upper = island.prayer.city.to_uppercase();
+            let pray_label_str = format!("PRAYER TIMES • {}", city_upper);
+            let pray_label = pray_label_str.encode_utf16().collect::<Vec<u16>>();
+            let pl_rect = D2D_RECT_F { left: col_l + 12.0, top: top_c + 2.0, right: cx - 55.0, bottom: top_c + 15.0 };
+            self.brush_accent.SetColor(&prayer_theme_color);
+            self.d2d_context.DrawText(&pray_label, &self.format_tag, &pl_rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+
+            // Subtle interactive GPS pill badge [⟳ GPS]
+            let gps_badge_rect = D2D1_ROUNDED_RECT {
+                rect: D2D_RECT_F { left: cx - 48.0, top: top_c + 1.0, right: cx - 12.0, bottom: top_c + 15.0 },
+                radiusX: 6.0,
+                radiusY: 6.0,
+            };
+            let gps_bg = if island.prayer.is_gps_detecting {
+                D2D1_COLOR_F { r: 0.0, g: 0.48, b: 1.0, a: 0.28 * alpha }
+            } else {
+                D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 * alpha }
+            };
+            self.brush_btn_bg.SetColor(&gps_bg);
+            self.d2d_context.FillRoundedRectangle(&gps_badge_rect, &self.brush_btn_bg);
+            let gps_text = if island.prayer.is_gps_detecting { "GPS..." } else { "⟳ GPS" };
+            let gps_utf: Vec<u16> = gps_text.encode_utf16().collect();
+            let gps_t_rect = D2D_RECT_F { left: cx - 48.0, top: top_c + 1.0, right: cx - 12.0, bottom: top_c + 15.0 };
+            let gps_color = if island.prayer.is_gps_detecting {
+                D2D1_COLOR_F { r: 0.40, g: 0.80, b: 1.0, a: 0.95 * alpha }
+            } else {
+                D2D1_COLOR_F { r: 0.70, g: 0.75, b: 0.85, a: 0.75 * alpha }
+            };
+            self.brush_subtext.SetColor(&gps_color);
+            self.d2d_context.DrawText(&gps_utf, &self.format_pill_tag, &gps_t_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+
+            // 2. Large Bold Prayer Name (e.g. "Subuh", "Dzuhur", "Ashar")
+            let next_sholat_str = island.prayer.next_prayer.name.clone();
+            let next_sholat = next_sholat_str.encode_utf16().collect::<Vec<u16>>();
+            let ns_rect = D2D_RECT_F { left: col_l, top: top_c + 15.0, right: cx - 10.0, bottom: top_c + 40.0 };
+            self.brush_white.SetColor(&D2D1_COLOR_F { r: 0.98, g: 0.98, b: 1.0, a: 0.98 * alpha });
+            self.d2d_context.DrawText(&next_sholat, &self.format_display, &ns_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+
+            // 3. Time and Countdown (e.g. "04:08   in 8h 25m")
+            let countdown_str = format!("{}   {}", island.prayer.next_prayer.time_str, island.prayer.next_prayer.countdown_str);
+            let countdown = countdown_str.encode_utf16().collect::<Vec<u16>>();
             let cd_rect = D2D_RECT_F { left: col_l, top: top_c + 40.0, right: cx - 10.0, bottom: top_c + 54.0 };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.38, g: 0.78, b: 1.0, a: 0.95 * alpha });
-            self.d2d_context.DrawText(&countdown, &self.format_body, &cd_rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            self.brush_accent.SetColor(&prayer_theme_color);
+            self.d2d_context.DrawText(&countdown, &self.format_body, &cd_rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 
-            // Progress bar
-            let pbar_y = top_c + 58.0;
+            // 4. Progress bar towards next prayer
+            let pbar_y = top_c + 57.0;
             let pb_left = col_l;
             let pb_right = cx - 14.0;
             let pb_w = pb_right - pb_left;
-            let pb_ratio = 0.65f32;
+            let pb_ratio = island.prayer.next_prayer.progress_ratio.clamp(0.0, 1.0);
 
-            self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.14 * alpha });
+            self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.12 * alpha });
             self.d2d_context.DrawLine(pt(pb_left, pbar_y), pt(pb_right, pbar_y), &self.brush_btn_bg, 3.2, None);
 
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.35, g: 0.82, b: 0.98, a: 0.95 * alpha });
+            self.brush_accent.SetColor(&prayer_theme_color);
             self.d2d_context.DrawLine(pt(pb_left, pbar_y), pt(pb_left + pb_ratio * pb_w, pbar_y), &self.brush_accent, 3.2, None);
 
-            let sub_times = "Fajr 04:32 • Dhuhr 11:52 • Asr 15:12".encode_utf16().collect::<Vec<u16>>();
-            let st_rect = D2D_RECT_F { left: col_l, top: top_c + 68.0, right: cx - 10.0, bottom: top_c + 82.0 };
-            self.brush_subtext.SetOpacity(0.70 * alpha);
-            self.d2d_context.DrawText(&sub_times, &self.format_date, &st_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            // 5. Compact Clipped Sub-Times (Fixing text overlap into right column!)
+            let line1_str = format!(
+                "Sub {}  •  Dzu {}  •  Ash {}",
+                island.prayer.cached_times.fajr_str(),
+                island.prayer.cached_times.dhuhr_str(),
+                island.prayer.cached_times.asr_str()
+            );
+            let line2_str = format!(
+                "Mag {}  •  Isy {}",
+                island.prayer.cached_times.maghrib_str(),
+                island.prayer.cached_times.isha_str()
+            );
+            let line1_utf: Vec<u16> = line1_str.encode_utf16().collect();
+            let line2_utf: Vec<u16> = line2_str.encode_utf16().collect();
+            let st_rect1 = D2D_RECT_F { left: col_l, top: top_c + 63.0, right: cx - 12.0, bottom: top_c + 75.0 };
+            let st_rect2 = D2D_RECT_F { left: col_l, top: top_c + 75.0, right: cx - 12.0, bottom: top_c + 87.0 };
+            self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.72, g: 0.75, b: 0.82, a: 0.75 * alpha });
+            self.d2d_context.DrawText(&line1_utf, &self.format_tag, &st_rect1 as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            self.d2d_context.DrawText(&line2_utf, &self.format_tag, &st_rect2 as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 
-            // Right Column: Celestial Sun Arc (Curved Bézier track - Matching 04_prayer_times_arc.jpg)
+            // ==================== RIGHT COLUMN: CELESTIAL SUN ARC ====================
+            // Header
             let arc_label = "CELESTIAL SUN ARC".encode_utf16().collect::<Vec<u16>>();
             let al_rect = D2D_RECT_F { left: col_r, top: top_c + 2.0, right: right_c, bottom: top_c + 15.0 };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 1.0, g: 0.75, b: 0.25, a: 0.85 * alpha });
-            self.d2d_context.DrawText(&arc_label, &self.format_tag, &al_rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 1.0, g: 0.78, b: 0.35, a: 0.85 * alpha });
+            self.d2d_context.DrawText(&arc_label, &self.format_tag, &al_rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 
-            // Parabola Bézier Arc
+            // Parabola Bézier Arc Geometry
             let arc_left = col_r + 10.0;
             let arc_right = right_c - 10.0;
             let arc_base_y = top_c + 66.0;
-            let arc_top_y = top_c + 20.0;
+            let arc_top_y = top_c + 22.0;
 
             // Draw arc baseline
-            self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.10 * alpha });
-            self.d2d_context.DrawLine(pt(arc_left, arc_base_y), pt(arc_right, arc_base_y), &self.brush_btn_bg, 1.0, None);
+            self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.09 * alpha });
+            self.d2d_context.DrawLine(pt(arc_left - 3.0, arc_base_y), pt(arc_right + 3.0, arc_base_y), &self.brush_btn_bg, 1.0, None);
 
-            // Draw parabola segments
-            let steps = 16;
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 1.0, g: 0.78, b: 0.28, a: 0.40 * alpha });
+            // Multi-stop gradient along the parabola trajectory (24 smooth segments)
+            let steps = 24;
+            let is_daylight = island.prayer.sun_arc.is_daylight;
             for s in 0..steps {
                 let t1 = s as f32 / steps as f32;
                 let t2 = (s + 1) as f32 / steps as f32;
+                let t_mid = (t1 + t2) * 0.5;
 
                 let x1 = arc_left + t1 * (arc_right - arc_left);
                 let y1 = arc_base_y - (1.0 - 4.0 * (t1 - 0.5).powi(2)).max(0.0) * (arc_base_y - arc_top_y);
@@ -2515,39 +2850,119 @@ impl Renderer {
                 let x2 = arc_left + t2 * (arc_right - arc_left);
                 let y2 = arc_base_y - (1.0 - 4.0 * (t2 - 0.5).powi(2)).max(0.0) * (arc_base_y - arc_top_y);
 
-                self.d2d_context.DrawLine(pt(x1, y1), pt(x2, y2), &self.brush_accent, 1.6, None);
+                // Dynamic Apple-style celestial gradient colors
+                let seg_color = if is_daylight {
+                    if t_mid <= 0.40 {
+                        // Dawn Coral Gold -> Midday Brilliant Sun Gold
+                        let f = t_mid / 0.40;
+                        D2D1_COLOR_F {
+                            r: 1.0,
+                            g: 0.55 + f * 0.35,
+                            b: 0.25 - f * 0.15,
+                            a: 0.65 * alpha,
+                        }
+                    } else if t_mid <= 0.70 {
+                        // Midday Sun Gold -> Afternoon Amber
+                        let f = (t_mid - 0.40) / 0.30;
+                        D2D1_COLOR_F {
+                            r: 1.0,
+                            g: 0.90 - f * 0.32,
+                            b: 0.10 + f * 0.10,
+                            a: 0.65 * alpha,
+                        }
+                    } else {
+                        // Afternoon Amber -> Sunset Coral Rose
+                        let f = (t_mid - 0.70) / 0.30;
+                        D2D1_COLOR_F {
+                            r: 1.0 - f * 0.05,
+                            g: 0.58 - f * 0.26,
+                            b: 0.20 + f * 0.20,
+                            a: 0.65 * alpha,
+                        }
+                    }
+                } else {
+                    // Night: Twilight Indigo -> Midnight Lavender
+                    let f = (t_mid - 0.5).abs() * 2.0;
+                    D2D1_COLOR_F {
+                        r: 0.42 + (1.0 - f) * 0.18,
+                        g: 0.45 + (1.0 - f) * 0.10,
+                        b: 0.88 + (1.0 - f) * 0.08,
+                        a: 0.50 * alpha,
+                    }
+                };
+
+                self.brush_accent.SetColor(&seg_color);
+                self.d2d_context.DrawLine(pt(x1, y1), pt(x2, y2), &self.brush_accent, 2.0, None);
             }
 
-            // Waypoint dots: Fajr, Dhuhr, Asr, Maghrib
-            let waypoints = [0.05f32, 0.40, 0.65, 0.95];
-            for wp in waypoints {
+            // Waypoints & Micro-Labels for Prayer Times along the curve
+            let dhuhr_t = island.prayer.sun_arc.dhuhr_ratio.clamp(0.25, 0.55);
+            let asr_t = island.prayer.sun_arc.asr_ratio.clamp(0.56, 0.85);
+            let waypoints: [(f32, &str, D2D1_COLOR_F); 4] = [
+                (0.04, "Subuh", D2D1_COLOR_F { r: 0.19, g: 0.82, b: 0.35, a: 0.85 * alpha }),
+                (dhuhr_t, "Dzuhur", D2D1_COLOR_F { r: 1.00, g: 0.84, b: 0.04, a: 0.85 * alpha }),
+                (asr_t, "Ashar", D2D1_COLOR_F { r: 1.00, g: 0.58, b: 0.04, a: 0.85 * alpha }),
+                (0.96, "Maghrib", D2D1_COLOR_F { r: 1.00, g: 0.28, b: 0.25, a: 0.85 * alpha }),
+            ];
+
+            for (wp, label, wp_color) in waypoints {
                 let wx = arc_left + wp * (arc_right - arc_left);
                 let wy = arc_base_y - (1.0 - 4.0 * (wp - 0.5).powi(2)).max(0.0) * (arc_base_y - arc_top_y);
-                let dot = D2D1_ELLIPSE { point: pt(wx, wy), radiusX: 2.5, radiusY: 2.5 };
-                self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-                self.brush_white.SetOpacity(0.60 * alpha);
-                self.d2d_context.FillEllipse(&dot, &self.brush_white);
+
+                // Waypoint dot
+                let dot = D2D1_ELLIPSE { point: pt(wx, wy), radiusX: 2.4, radiusY: 2.4 };
+                self.brush_accent.SetColor(&wp_color);
+                self.d2d_context.FillEllipse(&dot, &self.brush_accent);
+
+                // Micro-label above or below waypoint
+                let label_utf: Vec<u16> = label.encode_utf16().collect();
+                let lbl_top = if wy < arc_base_y - 18.0 { wy - 12.0 } else { wy + 2.0 };
+                let lbl_rect = D2D_RECT_F {
+                    left: wx - 20.0,
+                    top: lbl_top,
+                    right: wx + 20.0,
+                    bottom: lbl_top + 10.0,
+                };
+                self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.82, g: 0.85, b: 0.90, a: 0.65 * alpha });
+                self.d2d_context.DrawText(&label_utf, &self.format_pill_tag, &lbl_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
             }
 
-            // Glowing Sun Orb: position on curve (e.g. t = 0.72 approaching sunset)
-            let sun_t = 0.72f32;
+            // Animated Celestial Sun / Moon Orb (Driven by island.sun_anim_t)
+            let sun_t = island.sun_anim_t.current.clamp(0.0, 1.0);
             let sun_x = arc_left + sun_t * (arc_right - arc_left);
-            let sun_y = arc_base_y - (1.0 - 4.0 * (sun_t - 0.5).powi(2)).max(0.0) * (arc_base_y - arc_top_y);
+            let sun_h = (1.0f32 - 4.0f32 * (sun_t - 0.5f32).powi(2)).max(0.0f32);
+            let sun_y = arc_base_y - sun_h * (arc_base_y - arc_top_y);
 
-            // Sun glow halo
-            let glow = D2D1_ELLIPSE { point: pt(sun_x, sun_y), radiusX: 10.0, radiusY: 10.0 };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 1.0, g: 0.65, b: 0.15, a: 0.22 * alpha });
+            // Ambient soft glow halo around orb
+            let halo_color = if is_daylight {
+                D2D1_COLOR_F { r: 1.0, g: 0.75, b: 0.20, a: 0.22 * alpha }
+            } else {
+                D2D1_COLOR_F { r: 0.50, g: 0.65, b: 1.0, a: 0.18 * alpha }
+            };
+            let glow = D2D1_ELLIPSE { point: pt(sun_x, sun_y), radiusX: 11.0, radiusY: 11.0 };
+            self.brush_accent.SetColor(&halo_color);
             self.d2d_context.FillEllipse(&glow, &self.brush_accent);
 
-            // Inner bright sun
-            let sun = D2D1_ELLIPSE { point: pt(sun_x, sun_y), radiusX: 4.5, radiusY: 4.5 };
-            self.brush_accent.SetColor(&D2D1_COLOR_F { r: 1.0, g: 0.88, b: 0.35, a: 0.98 * alpha });
-            self.d2d_context.FillEllipse(&sun, &self.brush_accent);
+            // Inner Core Vector Icon (Sun with micro rays or Crescent Moon)
+            if is_daylight {
+                let sun_color = D2D1_COLOR_F { r: 1.0, g: 0.92, b: 0.40, a: 0.98 * alpha };
+                self.draw_vector_sun(sun_x, sun_y, 0.95, &sun_color);
+            } else {
+                let moon_color = D2D1_COLOR_F { r: 0.82, g: 0.88, b: 1.0, a: 0.98 * alpha };
+                self.draw_vector_crescent_moon(sun_x, sun_y, 0.95, &moon_color);
+            }
 
-            let lbl_sun = "Sunset: 17:48".encode_utf16().collect::<Vec<u16>>();
-            let ls_rect = D2D_RECT_F { left: col_r, top: top_c + 70.0, right: right_c, bottom: top_c + 84.0 };
-            self.brush_subtext.SetOpacity(0.70 * alpha);
-            self.d2d_context.DrawText(&lbl_sun, &self.format_date, &ls_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+            // Bottom Right Status with Vector Celestial Icon (Sun or Moon)
+            if is_daylight {
+                self.draw_vector_sun(col_r + 6.0, top_c + 78.0, 0.75, &D2D1_COLOR_F { r: 1.0, g: 0.80, b: 0.30, a: 0.85 * alpha });
+            } else {
+                self.draw_vector_crescent_moon(col_r + 6.0, top_c + 78.0, 0.75, &D2D1_COLOR_F { r: 0.75, g: 0.82, b: 1.0, a: 0.85 * alpha });
+            }
+
+            let status_utf: Vec<u16> = island.prayer.sun_arc.status_text.encode_utf16().collect();
+            let ls_rect = D2D_RECT_F { left: col_r + 16.0, top: top_c + 71.0, right: right_c, bottom: top_c + 85.0 };
+            self.brush_subtext.SetColor(&D2D1_COLOR_F { r: 0.85, g: 0.88, b: 0.94, a: 0.75 * alpha });
+            self.d2d_context.DrawText(&status_utf, &self.format_date, &ls_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
         }
     }
 

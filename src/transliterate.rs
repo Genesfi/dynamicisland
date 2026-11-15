@@ -1,5 +1,37 @@
+use std::sync::mpsc::{channel, Sender};
+use std::sync::OnceLock;
 use windows::core::HSTRING;
 use windows::Globalization::JapanesePhoneticAnalyzer;
+
+struct StaTransliterateRequest {
+    texts: Vec<String>,
+    resp: Sender<Vec<Option<String>>>,
+}
+
+static STA_WORKER: OnceLock<Sender<StaTransliterateRequest>> = OnceLock::new();
+
+fn get_sta_worker() -> &'static Sender<StaTransliterateRequest> {
+    STA_WORKER.get_or_init(|| {
+        let (tx, rx) = channel::<StaTransliterateRequest>();
+        std::thread::Builder::new()
+            .name("JapanesePhoneticSTA".to_string())
+            .spawn(move || {
+                unsafe {
+                    use windows::Win32::System::Com::{CoInitializeEx, COINIT_APARTMENTTHREADED};
+                    let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
+                }
+                while let Ok(req) = rx.recv() {
+                    let mut results = Vec::with_capacity(req.texts.len());
+                    for text in req.texts {
+                        results.push(transliterate_japanese_impl(&text));
+                    }
+                    let _ = req.resp.send(results);
+                }
+            })
+            .expect("Failed to spawn STA thread");
+        tx
+    })
+}
 
 /// Checks if a string contains CJK characters (Japanese Kana/Kanji, Korean Hangul, Chinese Hanzi).
 pub fn contains_cjk(text: &str) -> bool {
@@ -175,22 +207,65 @@ fn match_digraph(c1: char, c2: char) -> Option<&'static str> {
     }
 }
 
-/// Transliterates Japanese text (Kanji + Kana) into Romaji using Windows JapanesePhoneticAnalyzer.
-pub fn transliterate_japanese(text: &str) -> Option<String> {
+fn normalize_fullwidth(s: &str) -> String {
+    s.chars().map(|c| {
+        let u = c as u32;
+        if (0xFF01..=0xFF5E).contains(&u) {
+            char::from_u32(u - 0xFEE0).unwrap_or(c)
+        } else if u == 0x3000 {
+            ' '
+        } else {
+            c
+        }
+    }).collect()
+}
+
+fn transliterate_japanese_impl(text: &str) -> Option<String> {
     let hstr = HSTRING::from(text);
     let words = JapanesePhoneticAnalyzer::GetWords(&hstr).ok()?;
 
     let mut out = String::with_capacity(text.len() * 2);
-    for (i, word) in words.into_iter().enumerate() {
-        if i > 0 && !out.ends_with(' ') {
-            out.push(' ');
-        }
+    for word in words.into_iter() {
+        let raw_disp = word.DisplayText().map(|h| h.to_string()).unwrap_or_default();
+        let disp = normalize_fullwidth(&raw_disp);
         let yomi = word.YomiText().map(|h| h.to_string()).unwrap_or_default();
-        if !yomi.is_empty() {
-            out.push_str(&kana_to_romaji(&yomi));
+
+        // If display text is pure ASCII / Latin / digits / punctuation (e.g. "Glitters", "123", "!"),
+        // preserve original display text instead of full-width yomi
+        if disp.chars().all(|c| c.is_ascii()) {
+            let trimmed = disp.trim();
+            if !trimmed.is_empty() {
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str(trimmed);
+            }
+            continue;
+        }
+
+        let has_kana_kanji = raw_disp.chars().any(|c| {
+            let u = c as u32;
+            (0x3040..=0x30FF).contains(&u) || (0x4E00..=0x9FFF).contains(&u)
+        });
+
+        if has_kana_kanji && !yomi.is_empty() {
+            let rom = kana_to_romaji(&yomi);
+            let trimmed = rom.trim();
+            if !trimmed.is_empty() {
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str(trimmed);
+            }
         } else {
-            let disp = word.DisplayText().map(|h| h.to_string()).unwrap_or_default();
-            out.push_str(&kana_to_romaji(&disp));
+            let rom = kana_to_romaji(&disp);
+            let trimmed = rom.trim();
+            if !trimmed.is_empty() {
+                if !out.is_empty() && !out.ends_with(' ') {
+                    out.push(' ');
+                }
+                out.push_str(trimmed);
+            }
         }
     }
 
@@ -198,6 +273,37 @@ pub fn transliterate_japanese(text: &str) -> Option<String> {
         None
     } else {
         Some(out.trim().to_string())
+    }
+}
+
+/// Transliterates Japanese text (Kanji + Kana) into Romaji using Windows JapanesePhoneticAnalyzer.
+pub fn transliterate_japanese(text: &str) -> Option<String> {
+    let (resp_tx, resp_rx) = channel();
+    let req = StaTransliterateRequest {
+        texts: vec![text.to_string()],
+        resp: resp_tx,
+    };
+    let worker = get_sta_worker();
+    if worker.send(req).is_ok() {
+        resp_rx.recv().ok().and_then(|mut v| v.pop().flatten())
+    } else {
+        None
+    }
+}
+
+/// Batch transliterates a list of strings efficiently on the STA worker thread.
+#[allow(dead_code)]
+pub fn batch_transliterate_japanese(texts: Vec<String>) -> Vec<Option<String>> {
+    let (resp_tx, resp_rx) = channel();
+    let req = StaTransliterateRequest {
+        texts,
+        resp: resp_tx,
+    };
+    let worker = get_sta_worker();
+    if worker.send(req).is_ok() {
+        resp_rx.recv().unwrap_or_default()
+    } else {
+        Vec::new()
     }
 }
 

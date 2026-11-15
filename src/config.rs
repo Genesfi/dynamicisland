@@ -154,6 +154,13 @@ pub struct AppConfig {
     pub use_full_media_card: bool,
     pub show_lyrics_in_capsule: bool,
     pub romanize_cjk_lyrics: bool,
+    pub prayer_city: String,
+    pub prayer_latitude: f64,
+    pub prayer_longitude: f64,
+    pub prayer_timezone: f64,
+    pub prayer_method: String,
+    pub prayer_offset_mins: i32,
+    pub calendar_url: String,
 }
 
 impl Default for AppConfig {
@@ -179,6 +186,13 @@ impl Default for AppConfig {
             use_full_media_card: false,
             show_lyrics_in_capsule: true,
             romanize_cjk_lyrics: false,
+            prayer_city: "Jakarta".to_string(),
+            prayer_latitude: -6.2088,
+            prayer_longitude: 106.8456,
+            prayer_timezone: 7.0,
+            prayer_method: "kemenag".to_string(),
+            prayer_offset_mins: 0,
+            calendar_url: String::new(),
         }
     }
 }
@@ -277,6 +291,35 @@ impl AppConfig {
                         "romanize_cjk_lyrics" => {
                             cfg.romanize_cjk_lyrics = parts[1] == "true" || parts[1] == "1";
                         }
+                        "prayer_city" => {
+                            cfg.prayer_city = parts[1].to_string();
+                        }
+                        "prayer_latitude" => {
+                            if let Ok(val) = parts[1].parse::<f64>() {
+                                cfg.prayer_latitude = val.clamp(-90.0, 90.0);
+                            }
+                        }
+                        "prayer_longitude" => {
+                            if let Ok(val) = parts[1].parse::<f64>() {
+                                cfg.prayer_longitude = val.clamp(-180.0, 180.0);
+                            }
+                        }
+                        "prayer_timezone" => {
+                            if let Ok(val) = parts[1].parse::<f64>() {
+                                cfg.prayer_timezone = val.clamp(-12.0, 14.0);
+                            }
+                        }
+                        "prayer_method" => {
+                            cfg.prayer_method = parts[1].to_string();
+                        }
+                        "prayer_offset_mins" => {
+                            if let Ok(val) = parts[1].parse::<i32>() {
+                                cfg.prayer_offset_mins = val.clamp(-30, 30);
+                            }
+                        }
+                        "calendar_url" => {
+                            cfg.calendar_url = parts[1].to_string();
+                        }
                         _ => {}
                     }
                 }
@@ -308,7 +351,7 @@ impl AppConfig {
         };
 
         let content = format!(
-            "# Dynamic Island Settings\ntop_margin={}\nauto_collapse_secs={}\nisland_style={}\nisland_opacity={:.2}\nglow_intensity={:.2}\nvinyl_speed={:.2}\ncompact_mode_view={}\ncompact_music_width={:.1}\ncompact_lyrics_width={:.1}\ndynamic_album_color={}\nenable_media_island={}\nenable_vinyl_animation={}\nhover_expand_media={}\nidle_click_through={}\nsmart_contour={}\ncontour_nudge_y={:.1}\nstart_with_windows={}\nuse_full_media_card={}\nshow_lyrics_in_capsule={}\nromanize_cjk_lyrics={}\n",
+            "# Dynamic Island Settings\ntop_margin={}\nauto_collapse_secs={}\nisland_style={}\nisland_opacity={:.2}\nglow_intensity={:.2}\nvinyl_speed={:.2}\ncompact_mode_view={}\ncompact_music_width={:.1}\ncompact_lyrics_width={:.1}\ndynamic_album_color={}\nenable_media_island={}\nenable_vinyl_animation={}\nhover_expand_media={}\nidle_click_through={}\nsmart_contour={}\ncontour_nudge_y={:.1}\nstart_with_windows={}\nuse_full_media_card={}\nshow_lyrics_in_capsule={}\nromanize_cjk_lyrics={}\nprayer_city={}\nprayer_latitude={:.4}\nprayer_longitude={:.4}\nprayer_timezone={:.1}\nprayer_method={}\nprayer_offset_mins={}\ncalendar_url={}\n",
             self.top_margin,
             self.auto_collapse_secs,
             style_str,
@@ -328,7 +371,14 @@ impl AppConfig {
             self.start_with_windows,
             self.use_full_media_card,
             self.show_lyrics_in_capsule,
-            self.romanize_cjk_lyrics
+            self.romanize_cjk_lyrics,
+            self.prayer_city,
+            self.prayer_latitude,
+            self.prayer_longitude,
+            self.prayer_timezone,
+            self.prayer_method,
+            self.prayer_offset_mins,
+            self.calendar_url
         );
         let path = get_config_path();
         let _ = fs::write(&path, &content);

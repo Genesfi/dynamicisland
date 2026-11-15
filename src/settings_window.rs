@@ -31,13 +31,15 @@ const CLIENT_HEIGHT: u32 = 680;
 pub enum SettingsTab {
     Appearance,
     Music,
+    Prayer,
     System,
 }
 
-// Tab navigation buttons
-const TAB_APPEARANCE: (f32, f32, f32, f32) = (20.0, 70.0, 172.0, 102.0);
-const TAB_MUSIC: (f32, f32, f32, f32) = (178.0, 70.0, 338.0, 102.0);
-const TAB_SYSTEM: (f32, f32, f32, f32) = (344.0, 70.0, 500.0, 102.0);
+// Tab navigation buttons (4 equal tabs across 480px width)
+const TAB_APPEARANCE: (f32, f32, f32, f32) = (20.0, 70.0, 135.0, 102.0);
+const TAB_MUSIC: (f32, f32, f32, f32) = (141.0, 70.0, 256.0, 102.0);
+const TAB_PRAYER: (f32, f32, f32, f32) = (262.0, 70.0, 377.0, 102.0);
+const TAB_SYSTEM: (f32, f32, f32, f32) = (383.0, 70.0, 500.0, 102.0);
 
 // --- Tab 0: Appearance Coordinates ---
 const CARD_STYLE_0: (f32, f32, f32, f32) = (20.0, 134.0, 254.0, 184.0);
@@ -70,6 +72,26 @@ const TOGGLE_CARD_STARTUP: (f32, f32, f32, f32) = (20.0, 134.0, 500.0, 180.0);
 const TOGGLE_CARD_CLICK_THROUGH: (f32, f32, f32, f32) = (20.0, 188.0, 500.0, 234.0);
 const TOGGLE_CARD_SMART_CONTOUR: (f32, f32, f32, f32) = (20.0, 242.0, 500.0, 288.0);
 const SLIDER_CARD_TIMEOUT: (f32, f32, f32, f32) = (20.0, 324.0, 500.0, 372.0);
+
+// --- Tab 3: Prayer & Sun Arc Coordinates ---
+const BUTTON_CARD_GPS: (f32, f32, f32, f32) = (20.0, 134.0, 500.0, 184.0);
+
+const CHIP_CITY_0: (f32, f32, f32, f32) = (20.0, 218.0, 172.0, 250.0);
+const CHIP_CITY_1: (f32, f32, f32, f32) = (178.0, 218.0, 338.0, 250.0);
+const CHIP_CITY_2: (f32, f32, f32, f32) = (344.0, 218.0, 500.0, 250.0);
+const CHIP_CITY_3: (f32, f32, f32, f32) = (20.0, 256.0, 172.0, 288.0);
+const CHIP_CITY_4: (f32, f32, f32, f32) = (178.0, 256.0, 338.0, 288.0);
+const CHIP_CITY_5: (f32, f32, f32, f32) = (344.0, 256.0, 500.0, 288.0);
+const CHIP_CITY_6: (f32, f32, f32, f32) = (20.0, 294.0, 172.0, 326.0);
+const CHIP_CITY_7: (f32, f32, f32, f32) = (178.0, 294.0, 338.0, 326.0);
+const CHIP_CITY_8: (f32, f32, f32, f32) = (344.0, 294.0, 500.0, 326.0);
+
+const CHIP_METHOD_0: (f32, f32, f32, f32) = (20.0, 360.0, 254.0, 396.0);
+const CHIP_METHOD_1: (f32, f32, f32, f32) = (266.0, 360.0, 500.0, 396.0);
+const CHIP_METHOD_2: (f32, f32, f32, f32) = (20.0, 402.0, 254.0, 438.0);
+const CHIP_METHOD_3: (f32, f32, f32, f32) = (266.0, 402.0, 500.0, 438.0);
+
+const SLIDER_CARD_OFFSET: (f32, f32, f32, f32) = (20.0, 474.0, 500.0, 522.0);
 
 #[inline]
 fn in_rect(x: f32, y: f32, r: (f32, f32, f32, f32)) -> bool {
@@ -129,6 +151,16 @@ struct SettingsState {
     smart_contour: bool,
     contour_nudge_y: f32,
     start_with_windows: bool,
+    prayer_city: String,
+    prayer_latitude: f64,
+    prayer_longitude: f64,
+    prayer_timezone: f64,
+    prayer_method: String,
+    prayer_offset_mins: i32,
+    calendar_url: String,
+    gps_detecting: bool,
+    gps_receiver: Option<std::sync::mpsc::Receiver<std::result::Result<(f64, f64, f64, String), String>>>,
+    gps_status: Option<String>,
 
     dragging_slider: Option<usize>,
     hovered_item: Option<usize>,
@@ -157,6 +189,13 @@ impl SettingsState {
             use_full_media_card: self.use_full_media_card,
             show_lyrics_in_capsule: self.show_lyrics_capsule,
             romanize_cjk_lyrics: self.romanize_cjk_lyrics,
+            prayer_city: self.prayer_city.clone(),
+            prayer_latitude: self.prayer_latitude,
+            prayer_longitude: self.prayer_longitude,
+            prayer_timezone: self.prayer_timezone,
+            prayer_method: self.prayer_method.clone(),
+            prayer_offset_mins: self.prayer_offset_mins,
+            calendar_url: self.calendar_url.clone(),
         };
         cfg.save();
 
@@ -195,6 +234,25 @@ impl SettingsState {
             radiusY: 2.5,
         };
         self.d2d_target.FillEllipse(&dot, &self.brush_card);
+    }
+
+    unsafe fn draw_location_icon(&self, cx: f32, cy: f32) {
+        let head = D2D1_ELLIPSE { point: pt(cx, cy - 2.0), radiusX: 4.2, radiusY: 4.2 };
+        self.d2d_target.DrawEllipse(&head, &self.brush_icon, 1.4, None);
+        let inner = D2D1_ELLIPSE { point: pt(cx, cy - 2.0), radiusX: 1.5, radiusY: 1.5 };
+        self.d2d_target.FillEllipse(&inner, &self.brush_icon);
+        self.d2d_target.DrawLine(pt(cx - 3.0, cy - 0.2), pt(cx, cy + 5.2), &self.brush_icon, 1.4, None);
+        self.d2d_target.DrawLine(pt(cx + 3.0, cy - 0.2), pt(cx, cy + 5.2), &self.brush_icon, 1.4, None);
+    }
+
+    #[allow(dead_code)]
+    unsafe fn draw_sun_icon(&self, cx: f32, cy: f32) {
+        let disc = D2D1_ELLIPSE { point: pt(cx, cy), radiusX: 3.2, radiusY: 3.2 };
+        self.d2d_target.FillEllipse(&disc, &self.brush_icon);
+        let dirs = [(0.0, -1.0), (0.707, -0.707), (1.0, 0.0), (0.707, 0.707), (0.0, 1.0), (-0.707, 0.707), (-1.0, 0.0), (-0.707, -0.707)];
+        for (dx, dy) in dirs {
+            self.d2d_target.DrawLine(pt(cx + dx * 4.4, cy + dy * 4.4), pt(cx + dx * 6.2, cy + dy * 6.2), &self.brush_icon, 1.2, None);
+        }
     }
 
     unsafe fn draw_desktop_icon(&self, cx: f32, cy: f32) {
@@ -580,6 +638,16 @@ pub fn open_settings_window(parent_hwnd: HWND) -> Result<()> {
             smart_contour: cfg.smart_contour,
             contour_nudge_y: cfg.contour_nudge_y,
             start_with_windows: cfg.start_with_windows,
+            prayer_city: cfg.prayer_city,
+            prayer_latitude: cfg.prayer_latitude,
+            prayer_longitude: cfg.prayer_longitude,
+            prayer_timezone: cfg.prayer_timezone,
+            prayer_method: cfg.prayer_method,
+            prayer_offset_mins: cfg.prayer_offset_mins,
+            calendar_url: cfg.calendar_url.clone(),
+            gps_detecting: false,
+            gps_receiver: None,
+            gps_status: None,
             dragging_slider: None,
             hovered_item: None,
         });
@@ -600,6 +668,34 @@ unsafe extern "system" fn settings_wndproc(
 ) -> LRESULT {
     match msg {
         WM_ERASEBKGND => LRESULT(1),
+        WM_TIMER => {
+            let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut SettingsState;
+            if !state_ptr.is_null() {
+                let state = &mut *state_ptr;
+                if let Some(ref rx) = state.gps_receiver {
+                    if let Ok(res) = rx.try_recv() {
+                        state.gps_detecting = false;
+                        state.gps_receiver = None;
+                        let _ = KillTimer(Some(hwnd), 2001);
+                        match res {
+                            Ok((lat, lon, tz, city)) => {
+                                state.prayer_city = city.clone();
+                                state.prayer_latitude = lat;
+                                state.prayer_longitude = lon;
+                                state.prayer_timezone = tz;
+                                state.gps_status = Some(format!("Detected: {}", city));
+                                state.auto_save();
+                            }
+                            Err(e) => {
+                                state.gps_status = Some(e);
+                            }
+                        }
+                        let _ = InvalidateRect(Some(hwnd), None, false);
+                    }
+                }
+            }
+            LRESULT(0)
+        }
         WM_PAINT => {
             let mut ps = PAINTSTRUCT::default();
             let _hdc = BeginPaint(hwnd, &mut ps);
@@ -636,9 +732,10 @@ unsafe extern "system" fn settings_wndproc(
 
                 // 3. Tab Bar Navigation
                 let tabs = [
-                    (TAB_APPEARANCE, SettingsTab::Appearance, "🎨 Appearance"),
-                    (TAB_MUSIC, SettingsTab::Music, "🎵 Music & Audio"),
-                    (TAB_SYSTEM, SettingsTab::System, "⚙ System"),
+                    (TAB_APPEARANCE, SettingsTab::Appearance, "Appearance"),
+                    (TAB_MUSIC, SettingsTab::Music, "Music & Audio"),
+                    (TAB_PRAYER, SettingsTab::Prayer, "Prayer & Sun"),
+                    (TAB_SYSTEM, SettingsTab::System, "System"),
                 ];
 
                 for (rect_f, tab, label) in tabs {
@@ -998,6 +1095,162 @@ unsafe extern "system" fn settings_wndproc(
                         state.d2d_target.FillEllipse(&thumb2, &state.brush_text_white);
                     }
 
+                    SettingsTab::Prayer => {
+                        // Section 1: LOCATION & GPS AUTO-DETECTION
+                        let sec1_rect = D2D_RECT_F { left: 22.0, top: 114.0, right: 400.0, bottom: 130.0 };
+                        let sec1_utf: Vec<u16> = "LOCATION & GPS AUTO-DETECTION".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec1_utf, &state.format_sec_title, &sec1_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        // GPS Auto-detect card
+                        let gps_card = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: BUTTON_CARD_GPS.0, top: BUTTON_CARD_GPS.1, right: BUTTON_CARD_GPS.2, bottom: BUTTON_CARD_GPS.3 },
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        state.d2d_target.FillRoundedRectangle(&gps_card, &state.brush_card);
+                        state.d2d_target.DrawRoundedRectangle(&gps_card, &state.brush_card_border, 1.0, None);
+
+                        state.draw_location_icon(BUTTON_CARD_GPS.0 + 22.0, (BUTTON_CARD_GPS.1 + BUTTON_CARD_GPS.3) * 0.5);
+
+                        let title_utf: Vec<u16> = "Auto-Detect Location (Windows GPS & IP)".encode_utf16().collect();
+                        let t_rect = D2D_RECT_F { left: BUTTON_CARD_GPS.0 + 38.0, top: BUTTON_CARD_GPS.1 + 8.0, right: BUTTON_CARD_GPS.2 - 120.0, bottom: BUTTON_CARD_GPS.1 + 26.0 };
+                        state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let sub_text = if state.gps_detecting {
+                            "Querying Windows Location API & IP fallback...".to_string()
+                        } else if let Some(ref s) = state.gps_status {
+                            s.clone()
+                        } else {
+                            format!("Active: {} ({:.4}, {:.4}, UTC{:+})", state.prayer_city, state.prayer_latitude, state.prayer_longitude, state.prayer_timezone as i32)
+                        };
+                        let sub_utf: Vec<u16> = sub_text.encode_utf16().collect();
+                        let s_rect = D2D_RECT_F { left: BUTTON_CARD_GPS.0 + 38.0, top: BUTTON_CARD_GPS.1 + 26.0, right: BUTTON_CARD_GPS.2 - 120.0, bottom: BUTTON_CARD_GPS.3 - 6.0 };
+                        state.d2d_target.DrawText(&sub_utf, &state.format_card_sub, &s_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+
+                        // GPS Button Pill on Right
+                        let btn_rect = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: BUTTON_CARD_GPS.2 - 108.0, top: BUTTON_CARD_GPS.1 + 10.0, right: BUTTON_CARD_GPS.2 - 14.0, bottom: BUTTON_CARD_GPS.3 - 10.0 },
+                            radiusX: 6.0,
+                            radiusY: 6.0,
+                        };
+                        let btn_bg = if state.gps_detecting { &state.brush_tab_active } else { &state.brush_card_hover };
+                        state.d2d_target.FillRoundedRectangle(&btn_rect, btn_bg);
+                        state.d2d_target.DrawRoundedRectangle(&btn_rect, &state.brush_accent, 1.2, None);
+                        let btn_lbl = if state.gps_detecting { "Detecting..." } else { "Auto Detect" };
+                        let btn_utf: Vec<u16> = btn_lbl.encode_utf16().collect();
+                        let btn_t_rect = D2D_RECT_F { left: BUTTON_CARD_GPS.2 - 108.0, top: BUTTON_CARD_GPS.1 + 10.0, right: BUTTON_CARD_GPS.2 - 14.0, bottom: BUTTON_CARD_GPS.3 - 10.0 };
+                        state.d2d_target.DrawText(&btn_utf, &state.format_badge, &btn_t_rect as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        // Preset Cities Section
+                        let sec_city_rect = D2D_RECT_F { left: 22.0, top: 198.0, right: 400.0, bottom: 214.0 };
+                        let sec_city_utf: Vec<u16> = "PRESET CITIES".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec_city_utf, &state.format_sec_title, &sec_city_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let cities = [
+                            (CHIP_CITY_0, "Jakarta"),
+                            (CHIP_CITY_1, "Bandung"),
+                            (CHIP_CITY_2, "Surabaya"),
+                            (CHIP_CITY_3, "Medan"),
+                            (CHIP_CITY_4, "Makassar"),
+                            (CHIP_CITY_5, "Yogyakarta"),
+                            (CHIP_CITY_6, "Makkah"),
+                            (CHIP_CITY_7, "Tokyo"),
+                            (CHIP_CITY_8, "London"),
+                        ];
+
+                        for &(rect_f, name) in &cities {
+                            let is_selected = state.prayer_city.eq_ignore_ascii_case(name);
+                            let chip_rect = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
+                                radiusX: 6.0,
+                                radiusY: 6.0,
+                            };
+                            let bg = if is_selected { &state.brush_card_selected_bg } else { &state.brush_card };
+                            let border = if is_selected { &state.brush_accent } else { &state.brush_card_border };
+                            state.d2d_target.FillRoundedRectangle(&chip_rect, bg);
+                            state.d2d_target.DrawRoundedRectangle(&chip_rect, border, if is_selected { 1.5 } else { 1.0 }, None);
+
+                            let name_utf: Vec<u16> = name.encode_utf16().collect();
+                            let t_rect = D2D_RECT_F { left: rect_f.0 + 8.0, top: rect_f.1 + 6.0, right: rect_f.2 - 8.0, bottom: rect_f.3 - 6.0 };
+                            let text_brush = if is_selected { &state.brush_text_white } else { &state.brush_text_sub };
+                            state.d2d_target.DrawText(&name_utf, &state.format_badge, &t_rect as *const _, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                        }
+
+                        // Section 2: CALCULATION METHOD
+                        let sec_method_rect = D2D_RECT_F { left: 22.0, top: 340.0, right: 400.0, bottom: 356.0 };
+                        let sec_method_utf: Vec<u16> = "CALCULATION METHOD".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec_method_utf, &state.format_sec_title, &sec_method_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let methods = [
+                            (CHIP_METHOD_0, "Kemenag RI (Standard)", "kemenag"),
+                            (CHIP_METHOD_1, "Muslim World League", "mwl"),
+                            (CHIP_METHOD_2, "Egyptian Authority", "egyptian"),
+                            (CHIP_METHOD_3, "Umm Al-Qura (Makkah)", "ummalqura"),
+                        ];
+
+                        for &(rect_f, name, id) in &methods {
+                            let is_selected = state.prayer_method.eq_ignore_ascii_case(id);
+                            let chip_rect = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
+                                radiusX: 6.0,
+                                radiusY: 6.0,
+                            };
+                            let bg = if is_selected { &state.brush_card_selected_bg } else { &state.brush_card };
+                            let border = if is_selected { &state.brush_accent } else { &state.brush_card_border };
+                            state.d2d_target.FillRoundedRectangle(&chip_rect, bg);
+                            state.d2d_target.DrawRoundedRectangle(&chip_rect, border, if is_selected { 1.5 } else { 1.0 }, None);
+
+                            let name_utf: Vec<u16> = name.encode_utf16().collect();
+                            let t_rect = D2D_RECT_F { left: rect_f.0 + 10.0, top: rect_f.1 + 8.0, right: rect_f.2 - 10.0, bottom: rect_f.3 - 8.0 };
+                            let text_brush = if is_selected { &state.brush_text_white } else { &state.brush_text_sub };
+                            state.d2d_target.DrawText(&name_utf, &state.format_badge, &t_rect as *const _, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                        }
+
+                        // Section 3: CALIBRATION & SCHEDULE OFFSET
+                        let sec_offset_rect = D2D_RECT_F { left: 22.0, top: 452.0, right: 400.0, bottom: 468.0 };
+                        let sec_offset_utf: Vec<u16> = "SCHEDULE MINUTE OFFSET".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec_offset_utf, &state.format_sec_title, &sec_offset_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let card_rect = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: SLIDER_CARD_OFFSET.0, top: SLIDER_CARD_OFFSET.1, right: SLIDER_CARD_OFFSET.2, bottom: SLIDER_CARD_OFFSET.3 },
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        state.d2d_target.FillRoundedRectangle(&card_rect, &state.brush_card);
+                        state.d2d_target.DrawRoundedRectangle(&card_rect, &state.brush_card_border, 1.0, None);
+
+                        state.draw_timer_icon(SLIDER_CARD_OFFSET.0 + 22.0, SLIDER_CARD_OFFSET.1 + 19.0);
+
+                        let title_utf: Vec<u16> = "Mosque Calibration (-15m to +15m)".encode_utf16().collect();
+                        let t_rect = D2D_RECT_F { left: SLIDER_CARD_OFFSET.0 + 38.0, top: SLIDER_CARD_OFFSET.1 + 8.0, right: SLIDER_CARD_OFFSET.2 - 80.0, bottom: SLIDER_CARD_OFFSET.1 + 26.0 };
+                        state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let val_str = if state.prayer_offset_mins > 0 {
+                            format!("+{} min", state.prayer_offset_mins)
+                        } else {
+                            format!("{} min", state.prayer_offset_mins)
+                        };
+                        let val_utf: Vec<u16> = val_str.encode_utf16().collect();
+                        let v_rect = D2D_RECT_F { left: SLIDER_CARD_OFFSET.2 - 90.0, top: SLIDER_CARD_OFFSET.1 + 8.0, right: SLIDER_CARD_OFFSET.2 - 14.0, bottom: SLIDER_CARD_OFFSET.1 + 26.0 };
+                        state.d2d_target.DrawText(&val_utf, &state.format_badge, &v_rect as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let norm = ((state.prayer_offset_mins + 15) as f32 / 30.0).clamp(0.0, 1.0);
+                        let track_y = SLIDER_CARD_OFFSET.1 + 35.0;
+                        let track_x1 = SLIDER_CARD_OFFSET.0 + 14.0;
+                        let track_x2 = SLIDER_CARD_OFFSET.2 - 14.0;
+
+                        state.d2d_target.DrawLine(pt(track_x1, track_y), pt(track_x2, track_y), &state.brush_card_border, 3.5, None);
+                        let fill_x = track_x1 + norm * (track_x2 - track_x1);
+                        state.d2d_target.DrawLine(pt(track_x1, track_y), pt(fill_x, track_y), &state.brush_accent, 3.5, None);
+
+                        let thumb = D2D1_ELLIPSE {
+                            point: windows_numerics::Vector2 { X: fill_x, Y: track_y },
+                            radiusX: 6.5,
+                            radiusY: 6.5,
+                        };
+                        state.d2d_target.FillEllipse(&thumb, &state.brush_text_white);
+                    }
+
                     SettingsTab::System => {
                         // Section 1: SYSTEM INTEGRATION
                         let sec1_rect = D2D_RECT_F { left: 22.0, top: 114.0, right: 400.0, bottom: 130.0 };
@@ -1122,6 +1375,10 @@ unsafe extern "system" fn settings_wndproc(
                     state.active_tab = SettingsTab::Music;
                     let _ = InvalidateRect(Some(hwnd), None, false);
                     return LRESULT(0);
+                } else if in_rect(x, y, TAB_PRAYER) {
+                    state.active_tab = SettingsTab::Prayer;
+                    let _ = InvalidateRect(Some(hwnd), None, false);
+                    return LRESULT(0);
                 } else if in_rect(x, y, TAB_SYSTEM) {
                     state.active_tab = SettingsTab::System;
                     let _ = InvalidateRect(Some(hwnd), None, false);
@@ -1226,6 +1483,162 @@ unsafe extern "system" fn settings_wndproc(
                         }
                     }
 
+                    SettingsTab::Prayer => {
+                        // Section 1: LOCATION & GPS AUTO-DETECTION
+                        let sec1_rect = D2D_RECT_F { left: 22.0, top: 114.0, right: 400.0, bottom: 130.0 };
+                        let sec1_utf: Vec<u16> = "LOCATION & GPS AUTO-DETECTION".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec1_utf, &state.format_sec_title, &sec1_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        // GPS Auto-detect card
+                        let gps_card = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: BUTTON_CARD_GPS.0, top: BUTTON_CARD_GPS.1, right: BUTTON_CARD_GPS.2, bottom: BUTTON_CARD_GPS.3 },
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        state.d2d_target.FillRoundedRectangle(&gps_card, &state.brush_card);
+                        state.d2d_target.DrawRoundedRectangle(&gps_card, &state.brush_card_border, 1.0, None);
+
+                        state.draw_location_icon(BUTTON_CARD_GPS.0 + 22.0, (BUTTON_CARD_GPS.1 + BUTTON_CARD_GPS.3) * 0.5);
+
+                        let title_utf: Vec<u16> = "Auto-Detect Location (Windows GPS & IP)".encode_utf16().collect();
+                        let t_rect = D2D_RECT_F { left: BUTTON_CARD_GPS.0 + 38.0, top: BUTTON_CARD_GPS.1 + 8.0, right: BUTTON_CARD_GPS.2 - 120.0, bottom: BUTTON_CARD_GPS.1 + 26.0 };
+                        state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let sub_text = if state.gps_detecting {
+                            "Querying Windows Location API & IP fallback...".to_string()
+                        } else if let Some(ref s) = state.gps_status {
+                            s.clone()
+                        } else {
+                            format!("Active: {} ({:.4}, {:.4}, UTC{:+})", state.prayer_city, state.prayer_latitude, state.prayer_longitude, state.prayer_timezone as i32)
+                        };
+                        let sub_utf: Vec<u16> = sub_text.encode_utf16().collect();
+                        let s_rect = D2D_RECT_F { left: BUTTON_CARD_GPS.0 + 38.0, top: BUTTON_CARD_GPS.1 + 26.0, right: BUTTON_CARD_GPS.2 - 120.0, bottom: BUTTON_CARD_GPS.3 - 6.0 };
+                        state.d2d_target.DrawText(&sub_utf, &state.format_card_sub, &s_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+
+                        // GPS Button Pill on Right
+                        let btn_rect = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: BUTTON_CARD_GPS.2 - 108.0, top: BUTTON_CARD_GPS.1 + 10.0, right: BUTTON_CARD_GPS.2 - 14.0, bottom: BUTTON_CARD_GPS.3 - 10.0 },
+                            radiusX: 6.0,
+                            radiusY: 6.0,
+                        };
+                        let btn_bg = if state.gps_detecting { &state.brush_tab_active } else { &state.brush_card_hover };
+                        state.d2d_target.FillRoundedRectangle(&btn_rect, btn_bg);
+                        state.d2d_target.DrawRoundedRectangle(&btn_rect, &state.brush_accent, 1.2, None);
+                        let btn_lbl = if state.gps_detecting { "Detecting..." } else { "Auto Detect" };
+                        let btn_utf: Vec<u16> = btn_lbl.encode_utf16().collect();
+                        let btn_t_rect = D2D_RECT_F { left: BUTTON_CARD_GPS.2 - 108.0, top: BUTTON_CARD_GPS.1 + 10.0, right: BUTTON_CARD_GPS.2 - 14.0, bottom: BUTTON_CARD_GPS.3 - 10.0 };
+                        state.d2d_target.DrawText(&btn_utf, &state.format_badge, &btn_t_rect as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        // Preset Cities Section
+                        let sec_city_rect = D2D_RECT_F { left: 22.0, top: 198.0, right: 400.0, bottom: 214.0 };
+                        let sec_city_utf: Vec<u16> = "PRESET CITIES".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec_city_utf, &state.format_sec_title, &sec_city_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let cities = [
+                            (CHIP_CITY_0, "Jakarta"),
+                            (CHIP_CITY_1, "Bandung"),
+                            (CHIP_CITY_2, "Surabaya"),
+                            (CHIP_CITY_3, "Medan"),
+                            (CHIP_CITY_4, "Makassar"),
+                            (CHIP_CITY_5, "Yogyakarta"),
+                            (CHIP_CITY_6, "Makkah"),
+                            (CHIP_CITY_7, "Tokyo"),
+                            (CHIP_CITY_8, "London"),
+                        ];
+
+                        for &(rect_f, name) in &cities {
+                            let is_selected = state.prayer_city.eq_ignore_ascii_case(name);
+                            let chip_rect = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
+                                radiusX: 6.0,
+                                radiusY: 6.0,
+                            };
+                            let bg = if is_selected { &state.brush_card_selected_bg } else { &state.brush_card };
+                            let border = if is_selected { &state.brush_accent } else { &state.brush_card_border };
+                            state.d2d_target.FillRoundedRectangle(&chip_rect, bg);
+                            state.d2d_target.DrawRoundedRectangle(&chip_rect, border, if is_selected { 1.5 } else { 1.0 }, None);
+
+                            let name_utf: Vec<u16> = name.encode_utf16().collect();
+                            let t_rect = D2D_RECT_F { left: rect_f.0 + 8.0, top: rect_f.1 + 6.0, right: rect_f.2 - 8.0, bottom: rect_f.3 - 6.0 };
+                            let text_brush = if is_selected { &state.brush_text_white } else { &state.brush_text_sub };
+                            state.d2d_target.DrawText(&name_utf, &state.format_badge, &t_rect as *const _, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                        }
+
+                        // Section 2: CALCULATION METHOD
+                        let sec_method_rect = D2D_RECT_F { left: 22.0, top: 340.0, right: 400.0, bottom: 356.0 };
+                        let sec_method_utf: Vec<u16> = "CALCULATION METHOD".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec_method_utf, &state.format_sec_title, &sec_method_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let methods = [
+                            (CHIP_METHOD_0, "Kemenag RI (Standard)", "kemenag"),
+                            (CHIP_METHOD_1, "Muslim World League", "mwl"),
+                            (CHIP_METHOD_2, "Egyptian Authority", "egyptian"),
+                            (CHIP_METHOD_3, "Umm Al-Qura (Makkah)", "ummalqura"),
+                        ];
+
+                        for &(rect_f, name, id) in &methods {
+                            let is_selected = state.prayer_method.eq_ignore_ascii_case(id);
+                            let chip_rect = D2D1_ROUNDED_RECT {
+                                rect: D2D_RECT_F { left: rect_f.0, top: rect_f.1, right: rect_f.2, bottom: rect_f.3 },
+                                radiusX: 6.0,
+                                radiusY: 6.0,
+                            };
+                            let bg = if is_selected { &state.brush_card_selected_bg } else { &state.brush_card };
+                            let border = if is_selected { &state.brush_accent } else { &state.brush_card_border };
+                            state.d2d_target.FillRoundedRectangle(&chip_rect, bg);
+                            state.d2d_target.DrawRoundedRectangle(&chip_rect, border, if is_selected { 1.5 } else { 1.0 }, None);
+
+                            let name_utf: Vec<u16> = name.encode_utf16().collect();
+                            let t_rect = D2D_RECT_F { left: rect_f.0 + 10.0, top: rect_f.1 + 8.0, right: rect_f.2 - 10.0, bottom: rect_f.3 - 8.0 };
+                            let text_brush = if is_selected { &state.brush_text_white } else { &state.brush_text_sub };
+                            state.d2d_target.DrawText(&name_utf, &state.format_badge, &t_rect as *const _, text_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                        }
+
+                        // Section 3: CALIBRATION & SCHEDULE OFFSET
+                        let sec_offset_rect = D2D_RECT_F { left: 22.0, top: 452.0, right: 400.0, bottom: 468.0 };
+                        let sec_offset_utf: Vec<u16> = "SCHEDULE MINUTE OFFSET".encode_utf16().collect();
+                        state.d2d_target.DrawText(&sec_offset_utf, &state.format_sec_title, &sec_offset_rect as *const _, &state.brush_text_sub, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let card_rect = D2D1_ROUNDED_RECT {
+                            rect: D2D_RECT_F { left: SLIDER_CARD_OFFSET.0, top: SLIDER_CARD_OFFSET.1, right: SLIDER_CARD_OFFSET.2, bottom: SLIDER_CARD_OFFSET.3 },
+                            radiusX: 7.0,
+                            radiusY: 7.0,
+                        };
+                        state.d2d_target.FillRoundedRectangle(&card_rect, &state.brush_card);
+                        state.d2d_target.DrawRoundedRectangle(&card_rect, &state.brush_card_border, 1.0, None);
+
+                        state.draw_timer_icon(SLIDER_CARD_OFFSET.0 + 22.0, SLIDER_CARD_OFFSET.1 + 19.0);
+
+                        let title_utf: Vec<u16> = "Mosque Calibration (-15m to +15m)".encode_utf16().collect();
+                        let t_rect = D2D_RECT_F { left: SLIDER_CARD_OFFSET.0 + 38.0, top: SLIDER_CARD_OFFSET.1 + 8.0, right: SLIDER_CARD_OFFSET.2 - 80.0, bottom: SLIDER_CARD_OFFSET.1 + 26.0 };
+                        state.d2d_target.DrawText(&title_utf, &state.format_card_title, &t_rect as *const _, &state.brush_text_white, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let val_str = if state.prayer_offset_mins > 0 {
+                            format!("+{} min", state.prayer_offset_mins)
+                        } else {
+                            format!("{} min", state.prayer_offset_mins)
+                        };
+                        let val_utf: Vec<u16> = val_str.encode_utf16().collect();
+                        let v_rect = D2D_RECT_F { left: SLIDER_CARD_OFFSET.2 - 90.0, top: SLIDER_CARD_OFFSET.1 + 8.0, right: SLIDER_CARD_OFFSET.2 - 14.0, bottom: SLIDER_CARD_OFFSET.1 + 26.0 };
+                        state.d2d_target.DrawText(&val_utf, &state.format_badge, &v_rect as *const _, &state.brush_accent, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+
+                        let norm = ((state.prayer_offset_mins + 15) as f32 / 30.0).clamp(0.0, 1.0);
+                        let track_y = SLIDER_CARD_OFFSET.1 + 35.0;
+                        let track_x1 = SLIDER_CARD_OFFSET.0 + 14.0;
+                        let track_x2 = SLIDER_CARD_OFFSET.2 - 14.0;
+
+                        state.d2d_target.DrawLine(pt(track_x1, track_y), pt(track_x2, track_y), &state.brush_card_border, 3.5, None);
+                        let fill_x = track_x1 + norm * (track_x2 - track_x1);
+                        state.d2d_target.DrawLine(pt(track_x1, track_y), pt(fill_x, track_y), &state.brush_accent, 3.5, None);
+
+                        let thumb = D2D1_ELLIPSE {
+                            point: windows_numerics::Vector2 { X: fill_x, Y: track_y },
+                            radiusX: 6.5,
+                            radiusY: 6.5,
+                        };
+                        state.d2d_target.FillEllipse(&thumb, &state.brush_text_white);
+                    }
+
                     SettingsTab::System => {
                         if in_rect(x, y, TOGGLE_CARD_STARTUP) {
                             state.start_with_windows = !state.start_with_windows;
@@ -1295,6 +1708,11 @@ unsafe extern "system" fn settings_wndproc(
                         6 => {
                             let norm = ((x - (SLIDER_CARD_LYRICS_WIDTH.0 + 14.0)) / (SLIDER_CARD_LYRICS_WIDTH.2 - SLIDER_CARD_LYRICS_WIDTH.0 - 28.0)).clamp(0.0, 1.0);
                             state.compact_lyrics_width = ((200.0 + norm * 240.0) / 5.0).round() * 5.0;
+                            state.auto_save();
+                        }
+                        7 => {
+                            let norm = ((x - (SLIDER_CARD_OFFSET.0 + 14.0)) / (SLIDER_CARD_OFFSET.2 - SLIDER_CARD_OFFSET.0 - 28.0)).clamp(0.0, 1.0);
+                            state.prayer_offset_mins = (-15.0 + norm * 30.0).round() as i32;
                             state.auto_save();
                         }
                         _ => {}

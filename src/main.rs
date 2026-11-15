@@ -4,6 +4,7 @@
 mod animation;
 mod audio_meter;
 mod battery;
+mod calendar;
 mod config;
 mod hydration;
 mod icons;
@@ -11,8 +12,10 @@ mod island;
 mod lyrics;
 mod media;
 mod notifications;
+mod prayer;
 mod renderer;
 mod settings_window;
+mod tasks;
 mod transliterate;
 mod tray;
 
@@ -79,6 +82,8 @@ struct AppState {
     media_pause_until: Option<Instant>,
     lyrics_retry_count: u32,
     lyrics_retry_at: Option<Instant>,
+    gps_sender: std::sync::mpsc::Sender<std::result::Result<(f64, f64, f64, String), String>>,
+    gps_receiver: Receiver<std::result::Result<(f64, f64, f64, String), String>>,
 }
 
 /// Dynamically syncs the OS window clipping region (GDI HRGN) to the exact pill capsule geometry.
@@ -99,7 +104,7 @@ fn sync_window_region(hwnd: HWND, state: &mut AppState) {
             state.last_rgn_rect = cur;
             unsafe {
                 let empty_rgn = CreateRectRgn(0, 0, 0, 0);
-                let _ = SetWindowRgn(hwnd, Some(empty_rgn), true);
+                let _ = SetWindowRgn(hwnd, Some(empty_rgn), false);
             }
         }
         return;
@@ -119,7 +124,7 @@ fn sync_window_region(hwnd: HWND, state: &mut AppState) {
         unsafe {
             let diam = (((cur_r + pad) * 2.0).round() as i32).max(1);
             let rgn = CreateRoundRectRgn(l, t, r, b, diam, diam);
-            let _ = SetWindowRgn(hwnd, Some(rgn), true);
+            let _ = SetWindowRgn(hwnd, Some(rgn), false);
         }
     }
 }
@@ -330,8 +335,99 @@ unsafe extern "system" fn wndproc(
                             }
                         }
 
-                        // 4. Card-specific hit testing for Music & Lyrics (card index 2)
-                        if state.island.current_card == 2 {
+                        // 4. Card-specific hit testing
+                        if state.island.current_card == 0 {
+                            // Card 0: Today Dashboard
+                            let top_c = top + 24.0;
+                            let col_r = cx + 12.0;
+                            let right_c = right - 44.0;
+
+                            // If there is a soon meeting with a link, check [Join] button click!
+                            if let Some(meeting) = &state.island.calendar.soon_meeting {
+                                if let Some(url) = &meeting.link {
+                                    if mouse_x >= right_c - 44.0 && mouse_x <= right_c - 4.0 && mouse_y >= top_c + 54.0 && mouse_y <= top_c + 80.0 {
+                                        let wide_url: Vec<u16> = url.encode_utf16().chain(Some(0)).collect();
+                                        let wide_open: Vec<u16> = "open".encode_utf16().chain(Some(0)).collect();
+                                        unsafe {
+                                            windows::Win32::UI::Shell::ShellExecuteW(
+                                                None,
+                                                windows::core::PCWSTR(wide_open.as_ptr()),
+                                                windows::core::PCWSTR(wide_url.as_ptr()),
+                                                None,
+                                                None,
+                                                windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+                                            );
+                                        }
+                                        return LRESULT(0);
+                                    }
+                                }
+                            }
+
+                            // Clicking anywhere on right column (Mini Calendar & Task Status box)
+                            // jumps directly to Card 1 (TodoList)!
+                            if mouse_x >= col_r && mouse_x <= right_c && mouse_y >= top_c && mouse_y <= top_c + 90.0 {
+                                state.island.current_card = 1;
+                                state.island.card_scroll_spring.set_target(1.0);
+                                state.island.remaining_time = 8.0;
+                                return LRESULT(0);
+                            }
+                        } else if state.island.current_card == 1 {
+                            // Card 1: TodoList & Weekly Planner
+                            let top_c = top + 26.0;
+                            let col_l = left + 44.0;
+                            let right_c = right - 44.0;
+                            let mid_left = col_l + 152.0;
+                            let mid_w = 142.0;
+
+                            // 1. [+ Add Task] Button: col_l .. col_l + 68.0, top_c + 54.0 .. top_c + 76.0
+                            if mouse_x >= col_l && mouse_x <= col_l + 68.0 && mouse_y >= top_c + 54.0 && mouse_y <= top_c + 76.0 {
+                                state.island.entering_task = Some(String::new());
+                                state.island.remaining_time = 15.0;
+                                return LRESULT(0);
+                            }
+
+                            // 2. [View Toggle] Button: col_l + 74.0 .. col_l + 142.0, top_c + 54.0 .. top_c + 76.0
+                            if mouse_x >= col_l + 74.0 && mouse_x <= col_l + 142.0 && mouse_y >= top_c + 54.0 && mouse_y <= top_c + 76.0 {
+                                state.island.tasks.toggle_view();
+                                state.island.remaining_time = 8.0;
+                                return LRESULT(0);
+                            }
+
+                            // 3. Task Rows (Row 0, 1, 2) in Middle Column
+                            if mouse_x >= mid_left && mouse_x <= mid_left + mid_w {
+                                for idx in 0..3 {
+                                    let row_top = top_c + 3.0 + (idx as f32) * 26.5;
+                                    if mouse_y >= row_top && mouse_y <= row_top + 25.0 {
+                                        // If clicked near far right (delete 'X' icon: mid_left + mid_w - 20.0 .. mid_left + mid_w)
+                                        if mouse_x >= mid_left + mid_w - 20.0 {
+                                            state.island.tasks.delete_task(idx);
+                                        } else {
+                                            // Clicked checkbox or text: toggle completion!
+                                            state.island.tasks.toggle_task(idx);
+                                        }
+                                        state.island.remaining_time = 8.0;
+                                        return LRESULT(0);
+                                    }
+                                }
+                            }
+
+                            // 4. Month Chevrons (< and >) in Right Column
+                            let chev_y = top_c + 7.5;
+                            if mouse_y >= chev_y - 8.0 && mouse_y <= chev_y + 8.0 {
+                                // Prev month '<'
+                                if mouse_x >= right_c - 24.0 && mouse_x <= right_c - 14.0 {
+                                    state.island.tasks.cycle_month(false);
+                                    state.island.remaining_time = 8.0;
+                                    return LRESULT(0);
+                                }
+                                // Next month '>'
+                                if mouse_x >= right_c - 13.0 && mouse_x <= right_c - 3.0 {
+                                    state.island.tasks.cycle_month(true);
+                                    state.island.remaining_time = 8.0;
+                                    return LRESULT(0);
+                                }
+                            }
+                        } else if state.island.current_card == 2 {
                             let top_c = top + 26.0;
                             let col_l = left + 44.0;
                             let right_c = right - 44.0;
@@ -489,6 +585,36 @@ unsafe extern "system" fn wndproc(
                                     return LRESULT(0);
                                 }
 
+                                // 1. Quick Romaji Toggle Pill [A / あ] (col_r + 80.0 .. col_r + 128.0)
+                                if mouse_x >= col_r + 78.0 && mouse_x <= col_r + 130.0 && mouse_y >= top_c - 2.0 && mouse_y <= top_c + 18.0 {
+                                    state.island.romanize_cjk_lyrics = !state.island.romanize_cjk_lyrics;
+                                    state.config.romanize_cjk_lyrics = state.island.romanize_cjk_lyrics;
+                                    state.config.save();
+                                    state.island.remaining_time = 6.0;
+                                    return LRESULT(0);
+                                }
+
+                                // 2. Candidate Switcher / Retry Pill [1/N Alt] or [Retry] (col_r + 134.0 .. col_r + 184.0)
+                                if mouse_x >= col_r + 132.0 && mouse_x <= col_r + 186.0 && mouse_y >= top_c - 2.0 && mouse_y <= top_c + 18.0 {
+                                    if state.island.lyrics_candidates.len() > 1 {
+                                        state.island.cycle_lyrics_candidate();
+                                    } else {
+                                        state.island.clear_cached_lyrics();
+                                        if let Some(ref track) = state.island.current_track {
+                                            state.island.lyrics_loading = true;
+                                            state.lyrics_retry_count = 0;
+                                            crate::lyrics::fetch_lyrics_async(
+                                                track.title.clone(),
+                                                track.artist.clone(),
+                                                track.duration_secs,
+                                                state.media_sender.clone(),
+                                            );
+                                        }
+                                    }
+                                    state.island.remaining_time = 6.0;
+                                    return LRESULT(0);
+                                }
+
                                 // Click in right column lyrics area: if lyrics are missing, trigger instant retry!
                                 if mouse_x >= cx + 12.0 && mouse_x <= right_c && mouse_y >= top_c + 12.0 && mouse_y <= top_c + 75.0 {
                                     let needs_fetch = state.island.current_lyrics.as_ref()
@@ -506,8 +632,51 @@ unsafe extern "system" fn wndproc(
                                             );
                                         }
                                     }
+                                    state.island.remaining_time = 6.0;
                                     return LRESULT(0);
                                 }
+                            }
+                        } else if state.island.current_card == 3 {
+                            // Card 3: Prayer Times & Sun Arc
+                            let top_c = top + 26.0;
+                            let col_l = left + 44.0;
+                            let col_r = cx + 12.0;
+                            let right_c = right - 44.0;
+
+                            // 1. Click on [⟳ GPS] badge
+                            if mouse_x >= cx - 55.0 && mouse_x <= cx - 10.0 && mouse_y >= top_c && mouse_y <= top_c + 20.0 {
+                                if !state.island.prayer.is_gps_detecting {
+                                    state.island.prayer.is_gps_detecting = true;
+                                    crate::prayer::detect_gps_location_async(state.gps_sender.clone());
+                                }
+                                state.island.remaining_time = 8.0;
+                                return LRESULT(0);
+                            }
+
+                            // 2. Left Column Click: Cycle preset cities (Jakarta -> Bandung -> Surabaya -> Medan -> ...)
+                            if mouse_x >= col_l && mouse_x <= cx - 10.0 && mouse_y >= top_c && mouse_y <= top_c + 86.0 {
+                                state.island.prayer.cycle_preset_city();
+                                state.config.prayer_city = state.island.prayer.city.clone();
+                                state.config.prayer_latitude = state.island.prayer.latitude;
+                                state.config.prayer_longitude = state.island.prayer.longitude;
+                                state.config.prayer_timezone = state.island.prayer.timezone;
+                                state.config.save();
+                                state.island.remaining_time = 8.0;
+                                return LRESULT(0);
+                            }
+
+                            // 3. Right Column Click: Cycle calculation method
+                            if mouse_x >= col_r && mouse_x <= right_c && mouse_y >= top_c && mouse_y <= top_c + 86.0 {
+                                state.island.prayer.cycle_method();
+                                state.config.prayer_method = match state.island.prayer.method {
+                                    crate::prayer::CalculationMethod::Kemenag => "kemenag".to_string(),
+                                    crate::prayer::CalculationMethod::MWL => "mwl".to_string(),
+                                    crate::prayer::CalculationMethod::Egyptian => "egyptian".to_string(),
+                                    crate::prayer::CalculationMethod::UmmAlQura => "ummalqura".to_string(),
+                                };
+                                state.config.save();
+                                state.island.remaining_time = 8.0;
+                                return LRESULT(0);
                             }
                         } else if state.island.current_card == 4 {
                             // Card 4: Water Reminder / Hydration Tracker
@@ -714,12 +883,47 @@ unsafe extern "system" fn wndproc(
                 }
                 DefWindowProcW(hwnd, msg, wparam, lparam)
             }
+            WM_CHAR => {
+                let ch = wparam.0 as u32;
+                let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
+                if !state_ptr.is_null() {
+                    let state = &mut *state_ptr;
+                    if let Some(ref mut buf) = state.island.entering_task {
+                        state.island.remaining_time = 15.0;
+                        if ch == 0x0D {
+                            // Enter: commit task!
+                            let task_title = buf.trim().to_string();
+                            if !task_title.is_empty() {
+                                state.island.tasks.add_task(task_title, "All Day".to_string(), 1);
+                            }
+                            state.island.entering_task = None;
+                        } else if ch == 0x1B {
+                            // Esc: cancel
+                            state.island.entering_task = None;
+                        } else if ch == 0x08 {
+                            // Backspace
+                            buf.pop();
+                        } else if let Some(c) = char::from_u32(ch) {
+                            if !c.is_control() {
+                                buf.push(c);
+                            }
+                        }
+                        return LRESULT(0);
+                    }
+                }
+                LRESULT(0)
+            }
             WM_KEYDOWN => {
                 let key = wparam.0 as u32;
                 let state_ptr = GetWindowLongPtrW(hwnd, GWLP_USERDATA) as *mut AppState;
                 if !state_ptr.is_null() {
                     let state = &mut *state_ptr;
-                    if key == 0x1B {
+                    if state.island.entering_task.is_some() {
+                        if key == 0x1B {
+                            state.island.entering_task = None;
+                            return LRESULT(0);
+                        }
+                    } else if key == 0x1B {
                         state.island.dismiss();
                     }
                 }
@@ -756,6 +960,14 @@ unsafe extern "system" fn wndproc(
                     state.island.show_lyrics_in_capsule = state.config.show_lyrics_in_capsule;
                     state.island.use_full_media_card = state.config.use_full_media_card;
                     state.island.romanize_cjk_lyrics = state.config.romanize_cjk_lyrics;
+                    state.island.prayer = crate::prayer::PrayerTracker::new(
+                        &state.config.prayer_city,
+                        state.config.prayer_latitude,
+                        state.config.prayer_longitude,
+                        state.config.prayer_timezone,
+                        state.config.prayer_offset_mins,
+                        crate::prayer::CalculationMethod::from_str(&state.config.prayer_method),
+                    );
 
                     if state.island.mode == island::IslandMode::Idle {
                         let target_w = state.island.target_idle_width();
@@ -798,6 +1010,24 @@ unsafe extern "system" fn wndproc(
                     // Sync system master volume when not actively dragging
                     if !state.dragging_volume {
                         state.island.volume = state.audio_meter.get_volume();
+                    }
+
+                    // Process incoming GPS location detection result
+                    while let Ok(res) = state.gps_receiver.try_recv() {
+                        state.island.prayer.is_gps_detecting = false;
+                        match res {
+                            Ok((lat, lon, tz, city)) => {
+                                state.island.prayer.set_location(&city, lat, lon, tz);
+                                state.config.prayer_city = city;
+                                state.config.prayer_latitude = lat;
+                                state.config.prayer_longitude = lon;
+                                state.config.prayer_timezone = tz;
+                                state.config.save();
+                            }
+                            Err(err) => {
+                                state.island.prayer.gps_status = Some(err);
+                            }
+                        }
                     }
 
                     // 1. Process real incoming Windows notifications from listener
@@ -870,10 +1100,20 @@ unsafe extern "system" fn wndproc(
                                     }
                                 }
                                 MediaEvent::ThumbnailLoaded(bytes) => {
-                                    if let Some(ref mut track) = state.island.current_track {
-                                        track.thumbnail_bytes = Some(bytes.clone());
+                                    let is_new = if let Some(ref mut track) = state.island.current_track {
+                                        let already_has = track.thumbnail_bytes.as_ref().map(|b| b == &bytes).unwrap_or(false);
+                                        if !already_has {
+                                            track.thumbnail_bytes = Some(bytes.clone());
+                                            true
+                                        } else {
+                                            false
+                                        }
+                                    } else {
+                                        true
+                                    };
+                                    if is_new {
+                                        state.renderer.set_album_art(&bytes, state.config.dynamic_album_color);
                                     }
-                                    state.renderer.set_album_art(&bytes, state.config.dynamic_album_color);
                                 }
                                 MediaEvent::PlaybackState(is_playing) => {
                                     if is_playing {
@@ -935,6 +1175,8 @@ unsafe extern "system" fn wndproc(
                                     };
 
                                     if belongs {
+                                        state.island.active_candidate_idx = 0;
+                                        state.island.lyrics_candidates = lyrics.candidates.clone();
                                         if !lyrics.lines.is_empty() || lyrics.is_instrumental {
                                             state.island.current_lyrics = Some(lyrics);
                                             state.island.lyrics_loading = false;
@@ -1247,6 +1489,14 @@ fn run_app() -> Result<()> {
         island.show_lyrics_in_capsule = config.show_lyrics_in_capsule;
         island.use_full_media_card = config.use_full_media_card;
         island.romanize_cjk_lyrics = config.romanize_cjk_lyrics;
+        island.prayer = crate::prayer::PrayerTracker::new(
+            &config.prayer_city,
+            config.prayer_latitude,
+            config.prayer_longitude,
+            config.prayer_timezone,
+            config.prayer_offset_mins,
+            crate::prayer::CalculationMethod::from_str(&config.prayer_method),
+        );
 
         // 6. Spawn Live Windows Notification Listener
         let (notif_tx, notif_rx) = std::sync::mpsc::channel::<Notification>();
@@ -1256,7 +1506,10 @@ fn run_app() -> Result<()> {
         let (media_tx, media_rx) = std::sync::mpsc::channel::<MediaEvent>();
         start_media_listener(media_tx.clone());
 
-        // 8. Register System Tray Icon
+        // 8. GPS Location Detector Channel
+        let (gps_tx, gps_rx) = std::sync::mpsc::channel();
+
+        // 9. Register System Tray Icon
         let _ = add_tray_icon(hwnd);
 
         let audio_meter = audio_meter::AudioMeter::new();
@@ -1282,6 +1535,8 @@ fn run_app() -> Result<()> {
             media_pause_until: None,
             lyrics_retry_count: 0,
             lyrics_retry_at: None,
+            gps_sender: gps_tx,
+            gps_receiver: gps_rx,
         });
 
         // Store AppState pointer into window UserData

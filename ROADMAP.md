@@ -167,13 +167,13 @@ Setiap kartu fitur berbagi tata letak (*layout container*) terpadu dengan dimens
 
 ## 7. Fase Implementasi (Milestones)
 
-| Fase | Modul | Deskripsi Pekerjaan |
-|---|---|---|
-| **Fase 1** | **Carousel & Pagination Framework** | Membuat container shelf di `renderer.rs` & `island.rs`: animasi transisi antar halaman (slide/fade), navigasi panah `<` `>`, dan indikator titik bawah. |
-| **Fase 2** | **Sing Along (Synced Lyrics)** | Integrasi HTTP client ringan ke LRCLIB, parsing format `.lrc`, dan rendering 3 baris lirik sinkron di panel kanan kartu musik. |
-| **Fase 3** | **Water Reminder** | Sistem pelacakan hidrasi lokal, timer interval berkala, circular arc meter Direct2D, dan persistensi harian. |
-| **Fase 4** | **Prayer Times & Sun Arc** | Kalkulator waktu sholat astronomis lokal (pure Rust math tanpa dependensi online), kurva lintasan matahari Bézier Direct2D. |
-| **Fase 5** | **TodoList & Today Dashboard** | Integrasi kalender lokal, checklist interaktif, dan aggregation antrean notifikasi Windows. |
+| Fase | Modul | Deskripsi Pekerjaan | Status |
+|---|---|---|:---:|
+| **Fase 1** | **Carousel & Pagination Framework** | Membuat container shelf di `renderer.rs` & `island.rs`: animasi transisi antar halaman (slide/fade), navigasi panah `<` `>`, dan indikator titik bawah. | ✅ Selesai |
+| **Fase 2** | **Sing Along (Synced Lyrics)** | Integrasi HTTP client ringan ke LRCLIB, parsing format `.lrc`, dan rendering 3 baris lirik sinkron di panel kanan kartu musik. | ✅ Selesai |
+| **Fase 3** | **Water Reminder** | Sistem pelacakan hidrasi lokal, timer interval berkala, circular arc meter Direct2D, dan persistensi harian. | ✅ Selesai |
+| **Fase 4** | **Prayer Times & Sun Arc** | Kalkulator waktu sholat astronomis lokal (pure Rust math Jean Meeus/FocusGrow tanpa dependensi runtime), kurva lintasan matahari gradien multi-stop Bézier Direct2D, animated Sun/Moon orb (`sun_anim_t`), waypoint micro-labels, GPS auto-detect, kalibrasi offset ($\pm 15$m), dan tab pengaturan dedicated. | ✅ Selesai |
+| **Fase 5** | **TodoList & Today Dashboard** | Algoritma kalender matematis sipil Howard Hinnant & Sakamoto ($O(1)$ zero-allocation), checklist interaktif persistensi `tasks.json`, inline task entry dengan kursor berkedip (`│`), integrasi sinkronisasi Google Calendar/Outlook `.ics` (RFC 5545), ekstraksi link meeting otomatis (Meet/Zoom/Teams), dan banner notifikasi proaktif `[Join]`. | ✅ Selesai |
 
 ---
 
