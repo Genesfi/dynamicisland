@@ -45,6 +45,57 @@ pub struct ActiveLyricInfo<'a> {
     pub fade_alpha: f32,    // 0.0 to 1.0 (smooth in/out opacity fade curve)
 }
 
+/// Estimates the phonetic length (syllables/morae) of a lyric string.
+/// In CJK scripts (Japanese Kanji/Kana, Chinese, Korean), every ideograph/syllable block
+/// counts as 1 mora/syllable. In Latin/Romaji, syllables are estimated from words & characters.
+fn estimate_lyric_units(text: &str) -> f32 {
+    let mut cjk_count = 0usize;
+    let mut non_cjk_chars = 0usize;
+    let mut non_cjk_words = 0usize;
+    let mut in_word = false;
+
+    for c in text.chars() {
+        let is_cjk = matches!(c as u32,
+            0x3040..=0x309F   // Hiragana
+            | 0x30A0..=0x30FF // Katakana
+            | 0x4E00..=0x9FFF // CJK Unified Ideographs (Kanji / Hanzi)
+            | 0x3400..=0x4DBF // CJK Extension A
+            | 0xAC00..=0xD7AF // Hangul Syllables (Korean)
+            | 0xFF00..=0xFFEF // Fullwidth Forms
+        );
+
+        if is_cjk {
+            cjk_count += 1;
+            if in_word {
+                non_cjk_words += 1;
+                in_word = false;
+            }
+        } else if c.is_alphanumeric() {
+            non_cjk_chars += 1;
+            in_word = true;
+        } else if c.is_whitespace() || c.is_ascii_punctuation() {
+            if in_word {
+                non_cjk_words += 1;
+                in_word = false;
+            }
+        }
+    }
+    if in_word {
+        non_cjk_words += 1;
+    }
+
+    if cjk_count > 0 {
+        // In CJK (Japanese / Chinese / Korean): each character is a spoken mora/syllable
+        let latin_syllables = (non_cjk_words as f32) * 1.5;
+        (cjk_count as f32) + latin_syllables
+    } else {
+        // Western / Romaji / Latin text
+        let words = (non_cjk_words as f32).max(1.0);
+        let chars = (non_cjk_chars as f32).max(1.0);
+        (words * 1.6 + chars * 0.15).max(words)
+    }
+}
+
 impl SongLyrics {
     /// Returns full info (previous, current, next, karaoke progress, and fade alpha) based on current audio playback position.
     pub fn get_active_line_info(&self, pos: f32, use_romaji: bool) -> ActiveLyricInfo<'_> {
@@ -157,14 +208,28 @@ impl SongLyrics {
         };
         let gap = (t_end - t_start).max(0.4);
 
-        // Natural vocal pacing: ~0.38s per word + breath attack/decay
-        let word_count = curr.split_whitespace().count().max(1) as f32;
-        let est_vocal_time = (word_count * 0.38 + 0.25).clamp(0.8, gap);
+        // Accurate phonetic syllables/morae measurement for both CJK and Latin scripts
+        let units = estimate_lyric_units(curr);
 
-        let active_duration = if gap > 2.0 {
-            est_vocal_time.min(gap * 0.82).max(1.0)
+        // Vocal phrase duration modeling:
+        // In pop/ballad music, typical singing pace is ~0.28s - 0.34s per mora/syllable.
+        let est_singing_time = (units * 0.30 + 0.45).max(0.8);
+
+        // Calculate realistic active singing duration within the available gap between lines:
+        let active_duration = if gap <= 4.0 {
+            // Normal connected lyric lines:
+            // Singing occupies almost the entire gap, leaving a natural breath window of ~0.20s - 0.38s
+            // before the next line starts.
+            let breath = (gap * 0.10).clamp(0.20, 0.38);
+            (gap - breath).max(0.4)
+        } else if gap <= 6.5 {
+            // Moderate pause between musical phrases:
+            let natural_max = gap * 0.88;
+            est_singing_time.clamp(2.5, natural_max)
         } else {
-            (gap * 0.92).max(0.4)
+            // Extended gap (instrumental interlude / verse-chorus break):
+            // The vocal line completes naturally, then the rest of the gap is an instrumental wait.
+            est_singing_time.clamp(2.0, gap - 1.2)
         };
 
         let elapsed = (pos - t_start).max(0.0);
@@ -646,6 +711,149 @@ fn fetch_kugou_candidates(
     candidates
 }
 
+// =========================================================================
+// QQ Music (Tencent) Lyric Provider (Backend for BetterLyrics Potato)
+// =========================================================================
+
+#[derive(Deserialize, Debug)]
+struct QqSinger {
+    name: Option<String>,
+}
+
+#[derive(Deserialize, Debug)]
+struct QqSongItem {
+    songmid: Option<String>,
+    #[allow(dead_code)]
+    songname: Option<String>,
+    interval: Option<u32>,
+    singer: Option<Vec<QqSinger>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct QqSongData {
+    list: Option<Vec<QqSongItem>>,
+}
+
+#[derive(Deserialize, Debug)]
+struct QqSearchData {
+    song: Option<QqSongData>,
+}
+
+#[derive(Deserialize, Debug)]
+struct QqSearchResponse {
+    data: Option<QqSearchData>,
+}
+
+#[derive(Deserialize, Debug)]
+struct QqLyricResponse {
+    lyric: Option<String>,
+}
+
+fn decode_qq_lyric(raw: &str) -> String {
+    if let Some(decoded) = base64_decode_string(raw) {
+        if decoded.contains('[') {
+            return decoded;
+        }
+    }
+    raw.replace("&#58;", ":")
+       .replace("&#10;", "\n")
+       .replace("&#32;", " ")
+       .replace("&#39;", "'")
+       .replace("&apos;", "'")
+       .replace("&quot;", "\"")
+       .replace("&amp;", "&")
+}
+
+fn fetch_qq_candidates(
+    clean_title: &str,
+    clean_artist: &str,
+    original_title: &str,
+    original_artist: &str,
+    target_duration: f32,
+) -> Vec<SongLyrics> {
+    let query = if clean_artist.is_empty() {
+        clean_title.to_string()
+    } else {
+        format!("{} {}", clean_title, clean_artist)
+    };
+    let enc_query = url_encode(query.trim());
+
+    let search_url = format!(
+        "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=3&w={}&format=json",
+        enc_query
+    );
+
+    let mut candidates = Vec::new();
+
+    let json_resp = match fetch_url_with_referer(&search_url, Some("https://y.qq.com/portal/player.html")) {
+        Some(j) => j,
+        None => return candidates,
+    };
+
+    let trimmed = json_resp.trim();
+    let json_slice = if let (Some(start), Some(end)) = (trimmed.find('{'), trimmed.rfind('}')) {
+        &trimmed[start..=end]
+    } else {
+        trimmed
+    };
+
+    let search_data: QqSearchResponse = match serde_json::from_str(json_slice) {
+        Ok(d) => d,
+        Err(_) => return candidates,
+    };
+
+    let song_list = match search_data.data.and_then(|d| d.song).and_then(|s| s.list) {
+        Some(l) => l,
+        None => return candidates,
+    };
+
+    for item in song_list.into_iter().take(2) {
+        let mid = match item.songmid {
+            Some(m) if !m.is_empty() => m,
+            _ => continue,
+        };
+
+        let singer = item.singer.as_ref()
+            .and_then(|s| s.first())
+            .and_then(|s| s.name.clone())
+            .unwrap_or_else(|| original_artist.to_string());
+
+        let dur_s = item.interval.unwrap_or(target_duration as u32);
+
+        let lyric_url = format!(
+            "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={}&format=json",
+            mid
+        );
+
+        if let Some(lyric_json) = fetch_url_with_referer(&lyric_url, Some("https://y.qq.com/portal/player.html")) {
+            let l_trimmed = lyric_json.trim();
+            let l_slice = if let (Some(start), Some(end)) = (l_trimmed.find('{'), l_trimmed.rfind('}')) {
+                &l_trimmed[start..=end]
+            } else {
+                l_trimmed
+            };
+
+            if let Ok(lyric_data) = serde_json::from_str::<QqLyricResponse>(l_slice) {
+                if let Some(raw_encoded) = lyric_data.lyric {
+                    let decoded_lrc = decode_qq_lyric(&raw_encoded);
+                    if !decoded_lrc.trim().is_empty() && decoded_lrc.contains('[') {
+                        let mut parsed = parse_lrc(&decoded_lrc, original_title, original_artist);
+                        let mins = dur_s / 60;
+                        let secs = dur_s % 60;
+                        parsed.candidate_info = format!("{} [QQ Music] ({}:{:02})", singer, mins, secs);
+                        if !parsed.lines.is_empty() {
+                            candidates.push(parsed);
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
 fn score_candidate(
     cand: &LrclibResponse,
     target_title: &str,
@@ -781,18 +989,25 @@ fn url_encode(input: &str) -> String {
     encoded
 }
 
-fn fetch_url_string(url: &str) -> Option<String> {
-    let output = std::process::Command::new("curl.exe")
-        .args(["-s", "-L", "-A", "DynamicIsland/1.0", "--max-time", "3", url])
-        .creation_flags(CREATE_NO_WINDOW)
-        .output()
-        .ok()?;
+fn fetch_url_with_referer(url: &str, referer: Option<&str>) -> Option<String> {
+    let mut cmd = std::process::Command::new("curl.exe");
+    cmd.args(["-s", "-L", "--max-time", "3", url]);
+    cmd.args(["-A", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"]);
+    if let Some(ref_val) = referer {
+        cmd.args(["-H", &format!("Referer: {}", ref_val)]);
+    }
+    cmd.creation_flags(CREATE_NO_WINDOW);
+    let output = cmd.output().ok()?;
 
     if output.status.success() && !output.stdout.is_empty() {
         String::from_utf8(output.stdout).ok()
     } else {
         None
     }
+}
+
+fn fetch_url_string(url: &str) -> Option<String> {
+    fetch_url_with_referer(url, None)
 }
 
 fn add_lrclib_items(json_str: &str, candidates: &mut Vec<LrclibResponse>) -> bool {
@@ -1028,8 +1243,28 @@ pub fn fetch_lyrics_async(
             }
         }
 
+        // QQ Music Fallback (BetterLyrics Potato backend):
+        // If neither LRCLIB nor NetEase found synced lyrics, query QQ Music!
+        let has_synced_after_netease = parsed_candidates.iter().any(|c| !c.lines.is_empty());
+        if !has_synced_after_netease {
+            let qq_cands = fetch_qq_candidates(
+                &clean_title,
+                &clean_artist,
+                &title,
+                &artist,
+                duration_secs,
+            );
+
+            if !qq_cands.is_empty() {
+                let old_cands = std::mem::replace(&mut parsed_candidates, qq_cands);
+                for item in old_cands {
+                    parsed_candidates.push(item);
+                }
+            }
+        }
+
         // KuGou Music Fallback:
-        // If neither LRCLIB nor NetEase found synced lyrics, query KuGou!
+        // If neither LRCLIB, NetEase, nor QQ Music found synced lyrics, query KuGou!
         let has_synced_so_far = parsed_candidates.iter().any(|c| !c.lines.is_empty());
         if !has_synced_so_far {
             let kugou_cands = fetch_kugou_candidates(

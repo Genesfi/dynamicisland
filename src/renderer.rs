@@ -1183,15 +1183,15 @@ impl Renderer {
         alpha: f32,
     ) {
         unsafe {
-            // Module Title on Left
+            // Module Title on Left (Aligned with content grid col_l = left + 44.0)
             let card_type = crate::island::ShelfCard::from_index(island.current_card);
             let title_str = card_type.title();
             let title_utf16: Vec<u16> = title_str.encode_utf16().collect();
             let title_rect = D2D_RECT_F {
-                left: left + 22.0,
-                top: top + 10.0,
-                right: left + 160.0,
-                bottom: top + 26.0,
+                left: left + 44.0,
+                top: top + 8.0,
+                right: left + 190.0,
+                bottom: top + 22.0,
             };
             self.brush_white.SetOpacity(0.95 * alpha);
             self.d2d_context.DrawText(
@@ -1219,13 +1219,13 @@ impl Renderer {
             // Center the combined (battery ring + date text)
             let dt_w = 124.0;
             let start_x = cx - (dt_w + 18.0) * 0.5;
-            self.draw_battery_ring(start_x + 5.0, top + 18.0, &island.battery, alpha);
+            self.draw_battery_ring(start_x + 5.0, top + 15.0, &island.battery, alpha);
 
             let dt_rect = D2D_RECT_F {
                 left: start_x + 16.0,
-                top: top + 10.0,
+                top: top + 8.0,
                 right: start_x + 16.0 + dt_w,
-                bottom: top + 26.0,
+                bottom: top + 22.0,
             };
             self.brush_subtext.SetOpacity(0.85 * alpha);
             self.d2d_context.DrawText(
@@ -1241,7 +1241,7 @@ impl Renderer {
             if config.enable_media_island && island.is_media_playing {
                 self.draw_audio_visualizer(
                     right - 48.0,
-                    top + 18.0,
+                    top + 15.0,
                     island.audio_peak,
                     island.audio_phase,
                     7,
@@ -1252,7 +1252,7 @@ impl Renderer {
 
             // Top-right collapse chevron button: "^"
             let chevron_x = right - 22.0;
-            let chevron_y = top + 18.0;
+            let chevron_y = top + 15.0;
             self.brush_white.SetOpacity(0.75 * alpha);
             self.d2d_context.DrawLine(
                 pt(chevron_x - 4.5, chevron_y + 2.0),
@@ -2168,351 +2168,384 @@ impl Renderer {
         unsafe {
             let cx = (left + right) * 0.5;
             let top_c = top + 26.0;
+            // Symmetric horizontal margins (44px each side)
             let col_l = left + 44.0;
             let right_c = right - 44.0;
+            let content_w = right_c - col_l; // usable width
 
             // Check if we render the unified full-width media player OR the 2-column lyrics split
             if !island.show_lyrics {
                 // =========================================================================
                 // VIEW A: Full-Width Spacious Media Player (Default View)
-                // Guaranteed 19.5px vertical clearance above bottom pagination dots
+                // Layout (top_c = top+26):
+                //   [Art 44x44] [Title / Artist] ← row 0: top_c+0 .. top_c+44
+                //   [Time] [────────────seek────────────] [Time]  ← row 1: seek_y = top_c+54
+                //   [💬]       [|◀  ▶/‖  ▶|]        [🔊──────]  ← row 2: ctrl_y = top_c+82
                 // =========================================================================
                 if let Some(track) = &island.current_track {
-                    let art_size = 40.0;
-                    let art_cx = col_l + art_size * 0.5;
-                    let art_cy = top_c + 2.0 + art_size * 0.5;
-                    let art_radius = art_size * 0.5;
+                    // --- Album Art (42×42, top_c + 7.0 gives a generous 11px gap below "Music") ---
+                    let art_size = 42.0;
+                    let art_top  = top_c + 7.0;
+                    let art_cx   = col_l + art_size * 0.5;
+                    let art_cy   = art_top + art_size * 0.5;
 
                     if let Some(art) = &self.album_art {
-                        self.draw_album_art_badge(art, art_cx, art_cy, art_radius, alpha);
+                        self.draw_album_art_badge(art, art_cx, art_cy, art_size * 0.5, alpha);
                     } else {
                         let rot = if config.enable_vinyl_animation { island.vinyl_rotation } else { 0.0 };
-                        self.draw_spinning_vinyl(art_cx, art_cy, art_radius, rot, alpha);
+                        self.draw_spinning_vinyl(art_cx, art_cy, art_size * 0.5, rot, alpha);
                     }
 
-                    // Title & Artist beside album art
-                    let text_left = col_l + art_size + 12.0;
+                    // --- Title & Artist (vertically stacked beside art) ---
+                    let text_x    = col_l + art_size + 12.0;
+                    let text_right = right_c - 8.0;
+
                     let title_rect = D2D_RECT_F {
-                        left: text_left,
-                        top: top_c + 3.0,
-                        right: right_c - 10.0,
-                        bottom: top_c + 21.0,
+                        left: text_x,
+                        top: art_top + 2.0,
+                        right: text_right,
+                        bottom: art_top + 20.0,
                     };
                     let title_utf: Vec<u16> = track.title.encode_utf16().collect();
                     self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
                     self.brush_white.SetOpacity(alpha);
                     self.d2d_context.DrawText(&title_utf, &self.format_title, &title_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 
-                    let artist_rect = D2D_RECT_F {
-                        left: text_left,
-                        top: top_c + 22.0,
-                        right: right_c - 10.0,
-                        bottom: top_c + 38.0,
-                    };
-                    let artist_str = if track.artist.is_empty() { "Now Playing".to_string() } else { track.artist.clone() };
+                    let artist_str  = if track.artist.is_empty() { "Now Playing".to_string() } else { track.artist.clone() };
                     let artist_utf: Vec<u16> = artist_str.encode_utf16().collect();
-                    self.brush_subtext.SetOpacity(0.85 * alpha);
+                    let artist_rect = D2D_RECT_F {
+                        left: text_x,
+                        top: art_top + 22.0,
+                        right: text_right,
+                        bottom: art_top + 39.0,
+                    };
+                    self.brush_subtext.SetOpacity(0.80 * alpha);
                     self.d2d_context.DrawText(&artist_utf, &self.format_body, &artist_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 
-                    // Full-width Seek Bar (Positioned at top_c + 49.0 = top + 75.0)
-                    let seek_y = top_c + 49.0;
+                    // --- Seek Bar Row (seek_y = top_c + 57.0) ---
+                    let seek_y = top_c + 57.0;
                     let pos_secs = track.position_secs.max(0.0);
                     let pos_mins = (pos_secs / 60.0).floor() as u32;
-                    let pos_rem = (pos_secs % 60.0).floor() as u32;
-                    let pos_str = format!("{:02}:{:02}", pos_mins, pos_rem);
+                    let pos_rem  = (pos_secs % 60.0).floor() as u32;
+                    let pos_str  = format!("{:02}:{:02}", pos_mins, pos_rem);
                     let pos_utf: Vec<u16> = pos_str.encode_utf16().collect();
 
-                    let pos_rect = D2D_RECT_F { left: col_l, top: seek_y - 7.0, right: col_l + 38.0, bottom: seek_y + 7.0 };
-                    self.brush_time.SetOpacity(0.85 * alpha);
+                    // Position timestamp (left-aligned, 36px wide)
+                    let time_w    = 36.0;
+                    let pos_rect  = D2D_RECT_F { left: col_l, top: seek_y - 7.0, right: col_l + time_w, bottom: seek_y + 7.0 };
+                    self.brush_time.SetOpacity(0.80 * alpha);
                     self.d2d_context.DrawText(&pos_utf, &self.format_date, &pos_rect as *const _, &self.brush_time, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-                    let seek_left = col_l + 42.0;
-                    let seek_right = right_c - 46.0;
-                    let seek_w = (seek_right - seek_left).max(10.0);
-                    let ratio = if track.duration_secs > 0.0 { (pos_secs / track.duration_secs).clamp(0.0, 1.0) } else { 0.0 };
-
-                    self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 * alpha });
-                    self.d2d_context.DrawLine(pt(seek_left, seek_y), pt(seek_right, seek_y), &self.brush_btn_bg, 3.2, None);
-
-                    let played_x = seek_left + ratio * seek_w;
-                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-                    self.brush_white.SetOpacity(0.95 * alpha);
-                    if ratio > 0.005 {
-                        self.d2d_context.DrawLine(pt(seek_left, seek_y), pt(played_x, seek_y), &self.brush_white, 3.2, None);
-                    }
-                    let thumb = D2D1_ELLIPSE { point: pt(played_x, seek_y), radiusX: 4.2, radiusY: 4.2 };
-                    self.d2d_context.FillEllipse(&thumb, &self.brush_white);
-
+                    // Remaining timestamp (right-aligned, 42px wide)
                     let rem_str = if track.duration_secs > 0.0 {
                         let rem_secs = (track.duration_secs - pos_secs).max(0.0);
-                        let rem_mins = (rem_secs / 60.0).floor() as u32;
-                        let rem_s = (rem_secs % 60.0).floor() as u32;
-                        format!("-{:02}:{:02}", rem_mins, rem_s)
-                    } else {
-                        "--:--".to_string()
-                    };
+                        format!("-{:02}:{:02}", (rem_secs / 60.0).floor() as u32, (rem_secs % 60.0).floor() as u32)
+                    } else { "--:--".to_string() };
                     let rem_utf: Vec<u16> = rem_str.encode_utf16().collect();
-                    let rem_rect = D2D_RECT_F { left: right_c - 42.0, top: seek_y - 7.0, right: right_c, bottom: seek_y + 7.0 };
-                    self.brush_time.SetOpacity(0.85 * alpha);
+                    let rem_w     = 42.0;
+                    let rem_rect  = D2D_RECT_F { left: right_c - rem_w, top: seek_y - 7.0, right: right_c, bottom: seek_y + 7.0 };
+                    self.brush_time.SetOpacity(0.80 * alpha);
                     self.d2d_context.DrawText(&rem_utf, &self.format_date, &rem_rect as *const _, &self.brush_time, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
 
-                    // Bottom Control Row: [💬] on left, Prev/Play/Next in center, Volume on right
-                    // ctrl_y = top_c + 78.0 = top + 104.0; play circle bottom = top + 117.5.
-                    // Bottom pagination bar is at bottom - 9.0 = top + 139.0 -> 21.5px vertical clearance!
-                    let ctrl_y = top_c + 78.0;
+                    // Seek track
+                    let seek_pad  = 4.0;
+                    let seek_left  = col_l + time_w + seek_pad;
+                    let seek_right = right_c - rem_w - seek_pad;
+                    let seek_w     = (seek_right - seek_left).max(10.0);
+                    let ratio = if track.duration_secs > 0.0 { (pos_secs / track.duration_secs).clamp(0.0, 1.0) } else { 0.0 };
 
-                    // Speech bubble lyrics toggle button [💬] at col_l + 10.0
+                    self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.18 * alpha });
+                    self.d2d_context.DrawLine(pt(seek_left, seek_y), pt(seek_right, seek_y), &self.brush_btn_bg, 3.0, None);
+                    let played_x = seek_left + ratio * seek_w;
+                    self.brush_accent.SetColor(&D2D1_COLOR_F {
+                        r: self.accent_color.0, g: self.accent_color.1, b: self.accent_color.2, a: 0.90 * alpha,
+                    });
+                    if ratio > 0.005 {
+                        self.d2d_context.DrawLine(pt(seek_left, seek_y), pt(played_x, seek_y), &self.brush_accent, 3.0, None);
+                    }
+                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+                    self.brush_white.SetOpacity(alpha);
+                    let thumb = D2D1_ELLIPSE { point: pt(played_x, seek_y), radiusX: 4.5, radiusY: 4.5 };
+                    self.d2d_context.FillEllipse(&thumb, &self.brush_white);
+
+                    // --- Controls Row (ctrl_y = top_c + 83.0) ---
+                    let ctrl_y = top_c + 83.0;
+
+                    // Speech bubble [💬] — far left
                     self.draw_speech_bubble_icon(col_l + 10.0, ctrl_y, false, alpha);
 
-                    // Center transport buttons
-                    let prev_cx = cx - 44.0;
+                    // Prev / Play / Next — perfectly centered in content area
+                    let transport_cx = (col_l + right_c) * 0.5;
+                    let prev_cx = transport_cx - 36.0;
+                    let next_cx = transport_cx + 36.0;
+
                     self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-                    self.brush_white.SetOpacity(0.85 * alpha);
-                    self.d2d_context.DrawLine(pt(prev_cx + 4.0, ctrl_y - 5.0), pt(prev_cx - 3.5, ctrl_y), &self.brush_white, 1.8, None);
-                    self.d2d_context.DrawLine(pt(prev_cx + 4.0, ctrl_y + 5.0), pt(prev_cx - 3.5, ctrl_y), &self.brush_white, 1.8, None);
-                    self.d2d_context.DrawLine(pt(prev_cx + 4.0, ctrl_y - 5.0), pt(prev_cx + 4.0, ctrl_y + 5.0), &self.brush_white, 1.8, None);
-                    self.d2d_context.DrawLine(pt(prev_cx - 5.0, ctrl_y - 4.5), pt(prev_cx - 5.0, ctrl_y + 4.5), &self.brush_white, 1.8, None);
+                    self.brush_white.SetOpacity(0.80 * alpha);
+                    // Prev icon
+                    self.d2d_context.DrawLine(pt(prev_cx + 4.5, ctrl_y - 5.5), pt(prev_cx - 3.5, ctrl_y), &self.brush_white, 1.8, None);
+                    self.d2d_context.DrawLine(pt(prev_cx + 4.5, ctrl_y + 5.5), pt(prev_cx - 3.5, ctrl_y), &self.brush_white, 1.8, None);
+                    self.d2d_context.DrawLine(pt(prev_cx + 4.5, ctrl_y - 5.5), pt(prev_cx + 4.5, ctrl_y + 5.5), &self.brush_white, 1.8, None);
+                    self.d2d_context.DrawLine(pt(prev_cx - 5.0, ctrl_y - 5.0), pt(prev_cx - 5.0, ctrl_y + 5.0), &self.brush_white, 1.8, None);
 
-                    let play_bg = D2D1_ELLIPSE { point: pt(cx, ctrl_y), radiusX: 13.5, radiusY: 13.5 };
-                    self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 * alpha });
+                    // Play/Pause button with circular bg
+                    let play_bg = D2D1_ELLIPSE { point: pt(transport_cx, ctrl_y), radiusX: 14.0, radiusY: 14.0 };
+                    self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.14 * alpha });
                     self.d2d_context.FillEllipse(&play_bg, &self.brush_btn_bg);
-
                     self.brush_white.SetOpacity(0.95 * alpha);
                     let is_really_playing = island.current_track.as_ref().map(|t| t.is_playing).unwrap_or(island.is_media_playing);
                     if is_really_playing {
-                        self.d2d_context.DrawLine(pt(cx - 3.0, ctrl_y - 4.8), pt(cx - 3.0, ctrl_y + 4.8), &self.brush_white, 2.2, None);
-                        self.d2d_context.DrawLine(pt(cx + 3.0, ctrl_y - 4.8), pt(cx + 3.0, ctrl_y + 4.8), &self.brush_white, 2.2, None);
+                        self.d2d_context.DrawLine(pt(transport_cx - 3.2, ctrl_y - 5.0), pt(transport_cx - 3.2, ctrl_y + 5.0), &self.brush_white, 2.4, None);
+                        self.d2d_context.DrawLine(pt(transport_cx + 3.2, ctrl_y - 5.0), pt(transport_cx + 3.2, ctrl_y + 5.0), &self.brush_white, 2.4, None);
                     } else {
-                        self.d2d_context.DrawLine(pt(cx - 3.0, ctrl_y - 5.0), pt(cx + 4.5, ctrl_y), &self.brush_white, 1.8, None);
-                        self.d2d_context.DrawLine(pt(cx - 3.0, ctrl_y + 5.0), pt(cx + 4.5, ctrl_y), &self.brush_white, 1.8, None);
-                        self.d2d_context.DrawLine(pt(cx - 3.0, ctrl_y - 5.0), pt(cx - 3.0, ctrl_y + 5.0), &self.brush_white, 1.8, None);
+                        self.d2d_context.DrawLine(pt(transport_cx - 3.5, ctrl_y - 5.5), pt(transport_cx + 5.0, ctrl_y), &self.brush_white, 2.0, None);
+                        self.d2d_context.DrawLine(pt(transport_cx - 3.5, ctrl_y + 5.5), pt(transport_cx + 5.0, ctrl_y), &self.brush_white, 2.0, None);
+                        self.d2d_context.DrawLine(pt(transport_cx - 3.5, ctrl_y - 5.5), pt(transport_cx - 3.5, ctrl_y + 5.5), &self.brush_white, 2.0, None);
                     }
 
-                    let next_cx = cx + 44.0;
-                    self.brush_white.SetOpacity(0.85 * alpha);
-                    self.d2d_context.DrawLine(pt(next_cx - 4.0, ctrl_y - 5.0), pt(next_cx + 3.5, ctrl_y), &self.brush_white, 1.8, None);
-                    self.d2d_context.DrawLine(pt(next_cx - 4.0, ctrl_y + 5.0), pt(next_cx + 3.5, ctrl_y), &self.brush_white, 1.8, None);
-                    self.d2d_context.DrawLine(pt(next_cx - 4.0, ctrl_y - 5.0), pt(next_cx - 4.0, ctrl_y + 5.0), &self.brush_white, 1.8, None);
-                    self.d2d_context.DrawLine(pt(next_cx + 5.0, ctrl_y - 4.5), pt(next_cx + 5.0, ctrl_y + 4.5), &self.brush_white, 1.8, None);
+                    // Next icon
+                    self.brush_white.SetOpacity(0.80 * alpha);
+                    self.d2d_context.DrawLine(pt(next_cx - 4.5, ctrl_y - 5.5), pt(next_cx + 3.5, ctrl_y), &self.brush_white, 1.8, None);
+                    self.d2d_context.DrawLine(pt(next_cx - 4.5, ctrl_y + 5.5), pt(next_cx + 3.5, ctrl_y), &self.brush_white, 1.8, None);
+                    self.d2d_context.DrawLine(pt(next_cx - 4.5, ctrl_y - 5.5), pt(next_cx - 4.5, ctrl_y + 5.5), &self.brush_white, 1.8, None);
+                    self.d2d_context.DrawLine(pt(next_cx + 5.0, ctrl_y - 5.0), pt(next_cx + 5.0, ctrl_y + 5.0), &self.brush_white, 1.8, None);
 
-                    // Speaker icon & volume slider on right
-                    let spk_x = right_c - 106.0;
-                    self.brush_white.SetOpacity(0.75 * alpha);
+                    // Volume — right side: speaker icon + slider, anchored to right_c
+                    let vol_right  = right_c - 8.0;
+                    let vol_left   = right_c - 90.0;
+                    let vol_w      = vol_right - vol_left;
+                    let spk_x      = vol_left - 12.0;
+                    self.brush_white.SetOpacity(0.65 * alpha);
                     self.d2d_context.DrawLine(pt(spk_x - 3.0, ctrl_y - 2.0), pt(spk_x - 1.0, ctrl_y - 2.0), &self.brush_white, 1.2, None);
-                    self.d2d_context.DrawLine(pt(spk_x - 1.0, ctrl_y - 2.0), pt(spk_x + 2.0, ctrl_y - 4.5), &self.brush_white, 1.2, None);
-                    self.d2d_context.DrawLine(pt(spk_x + 2.0, ctrl_y - 4.5), pt(spk_x + 2.0, ctrl_y + 4.5), &self.brush_white, 1.2, None);
-                    self.d2d_context.DrawLine(pt(spk_x + 2.0, ctrl_y + 4.5), pt(spk_x - 1.0, ctrl_y + 2.0), &self.brush_white, 1.2, None);
+                    self.d2d_context.DrawLine(pt(spk_x - 1.0, ctrl_y - 2.0), pt(spk_x + 2.5, ctrl_y - 4.5), &self.brush_white, 1.2, None);
+                    self.d2d_context.DrawLine(pt(spk_x + 2.5, ctrl_y - 4.5), pt(spk_x + 2.5, ctrl_y + 4.5), &self.brush_white, 1.2, None);
+                    self.d2d_context.DrawLine(pt(spk_x + 2.5, ctrl_y + 4.5), pt(spk_x - 1.0, ctrl_y + 2.0), &self.brush_white, 1.2, None);
                     self.d2d_context.DrawLine(pt(spk_x - 1.0, ctrl_y + 2.0), pt(spk_x - 3.0, ctrl_y + 2.0), &self.brush_white, 1.2, None);
                     self.d2d_context.DrawLine(pt(spk_x - 3.0, ctrl_y - 2.0), pt(spk_x - 3.0, ctrl_y + 2.0), &self.brush_white, 1.2, None);
 
-                    let vol_left = right_c - 94.0;
-                    let vol_right = right_c - 10.0;
-                    let vol_w = vol_right - vol_left;
-                    let vol_val = island.volume.clamp(0.0, 1.0);
-
-                    self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 * alpha });
-                    self.d2d_context.DrawLine(pt(vol_left, ctrl_y), pt(vol_right, ctrl_y), &self.brush_btn_bg, 3.2, None);
-
+                    let vol_val    = island.volume.clamp(0.0, 1.0);
+                    self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.18 * alpha });
+                    self.d2d_context.DrawLine(pt(vol_left, ctrl_y), pt(vol_right, ctrl_y), &self.brush_btn_bg, 3.0, None);
                     let vol_fill_x = vol_left + vol_val * vol_w;
-                    self.brush_white.SetOpacity(0.90 * alpha);
+                    self.brush_white.SetOpacity(0.85 * alpha);
                     if vol_val > 0.02 {
-                        self.d2d_context.DrawLine(pt(vol_left, ctrl_y), pt(vol_fill_x, ctrl_y), &self.brush_white, 3.2, None);
+                        self.d2d_context.DrawLine(pt(vol_left, ctrl_y), pt(vol_fill_x, ctrl_y), &self.brush_white, 3.0, None);
                     }
-                    let vol_thumb = D2D1_ELLIPSE { point: pt(vol_fill_x, ctrl_y), radiusX: 3.8, radiusY: 3.8 };
+                    let vol_thumb = D2D1_ELLIPSE { point: pt(vol_fill_x, ctrl_y), radiusX: 4.0, radiusY: 4.0 };
                     self.d2d_context.FillEllipse(&vol_thumb, &self.brush_white);
                 } else {
+                    // No track: placeholder
                     let disc_cx = col_l + 28.0;
-                    let disc_cy = top_c + 44.0;
-                    self.draw_spinning_vinyl(disc_cx, disc_cy, 22.0, 0.0, alpha * 0.6);
+                    let disc_cy = top_c + 40.0;
+                    self.draw_spinning_vinyl(disc_cx, disc_cy, 24.0, 0.0, alpha * 0.5);
 
                     let no_title = "No Active Music".encode_utf16().collect::<Vec<u16>>();
-                    let nt_rect = D2D_RECT_F { left: col_l + 62.0, top: top_c + 24.0, right: right_c, bottom: top_c + 44.0 };
+                    let nt_rect  = D2D_RECT_F { left: col_l + 68.0, top: top_c + 20.0, right: right_c, bottom: top_c + 40.0 };
                     self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
                     self.brush_white.SetOpacity(0.90 * alpha);
                     self.d2d_context.DrawText(&no_title, &self.format_title, &nt_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
 
-                    let no_sub = "Play Spotify or YouTube Music".encode_utf16().collect::<Vec<u16>>();
-                    let ns_rect = D2D_RECT_F { left: col_l + 62.0, top: top_c + 44.0, right: right_c, bottom: top_c + 64.0 };
-                    self.brush_subtext.SetOpacity(0.70 * alpha);
+                    let no_sub  = "Play Spotify or YouTube Music".encode_utf16().collect::<Vec<u16>>();
+                    let ns_rect = D2D_RECT_F { left: col_l + 68.0, top: top_c + 42.0, right: right_c, bottom: top_c + 60.0 };
+                    self.brush_subtext.SetOpacity(0.65 * alpha);
                     self.d2d_context.DrawText(&no_sub, &self.format_date, &ns_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 }
             } else {
                 // =========================================================================
-                // VIEW B: Two-Column Split (Compact Player on Left, Synced Lyrics on Right)
-                // Triggered when user clicks [💬] toggle button (Strictly NO emojis!)
+                // VIEW B: Two-Column Lyrics Split
+                // Left column  (col_l … cx-6):  compact player  (~half width)
+                // Right column (cx+6  … right_c): synced lyrics  (~half width)
+                //
+                // Right column layout:
+                //   top_c+0  .. top_c+16  → header row: "SYNCED LYRICS"  [A/あ]  [Alt]
+                //   top_c+16 .. top_c+74  → lyric area: prev / curr / next
+                //   top_c+74 .. top_c+88  → volume slider row
                 // =========================================================================
-                let col_r = cx + 12.0;
+                let split_x  = cx;          // divider x
+                let lyr_l    = split_x + 6.0;  // lyrics column left edge
+                let lyr_r    = right_c;         // lyrics column right edge
 
-                // Vertical divider between columns
-                self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 * alpha });
-                self.d2d_context.DrawLine(pt(cx, top_c + 4.0), pt(cx, top_c + 86.0), &self.brush_btn_bg, 1.0, None);
+                // --- Hairline vertical divider ---
+                self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.10 * alpha });
+                self.d2d_context.DrawLine(pt(split_x, top_c + 4.0), pt(split_x, top_c + 88.0), &self.brush_btn_bg, 1.0, None);
 
-                // Left Column: Compact Media Controller
+                // ---- Left Column: Compact Media Controller ----
+                let left_r = split_x - 6.0; // left column right edge
+
                 if let Some(track) = &island.current_track {
                     let art_size = 36.0;
-                    let art_cx = col_l + art_size * 0.5;
-                    let art_cy = top_c + 2.0 + art_size * 0.5;
-                    let art_radius = art_size * 0.5;
+                    let art_top  = top_c + 7.0;
+                    let art_cx   = col_l + art_size * 0.5;
+                    let art_cy   = art_top + art_size * 0.5;
 
                     if let Some(art) = &self.album_art {
-                        self.draw_album_art_badge(art, art_cx, art_cy, art_radius, alpha);
+                        self.draw_album_art_badge(art, art_cx, art_cy, art_size * 0.5, alpha);
                     } else {
                         let rot = if config.enable_vinyl_animation { island.vinyl_rotation } else { 0.0 };
-                        self.draw_spinning_vinyl(art_cx, art_cy, art_radius, rot, alpha);
+                        self.draw_spinning_vinyl(art_cx, art_cy, art_size * 0.5, rot, alpha);
                     }
 
-                    // Title & Artist
-                    let title_rect = D2D_RECT_F {
-                        left: col_l + art_size + 10.0,
-                        top: top_c + 2.0,
-                        right: cx - 10.0,
-                        bottom: top_c + 19.0,
-                    };
+                    // Title
+                    let txt_x = col_l + art_size + 8.0;
                     let title_utf: Vec<u16> = track.title.encode_utf16().collect();
                     self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
                     self.brush_white.SetOpacity(alpha);
-                    self.d2d_context.DrawText(&title_utf, &self.format_title, &title_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                    self.d2d_context.DrawText(
+                        &title_utf, &self.format_title,
+                        &D2D_RECT_F { left: txt_x, top: art_top + 1.0, right: left_r, bottom: art_top + 18.0 } as *const _,
+                        &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL,
+                    );
 
-                    let artist_rect = D2D_RECT_F {
-                        left: col_l + art_size + 10.0,
-                        top: top_c + 19.0,
-                        right: cx - 10.0,
-                        bottom: top_c + 34.0,
-                    };
+                    // Artist
                     let artist_str = if track.artist.is_empty() { "Now Playing".to_string() } else { track.artist.clone() };
                     let artist_utf: Vec<u16> = artist_str.encode_utf16().collect();
-                    self.brush_subtext.SetOpacity(0.80 * alpha);
-                    self.d2d_context.DrawText(&artist_utf, &self.format_body, &artist_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                    self.brush_subtext.SetOpacity(0.75 * alpha);
+                    self.d2d_context.DrawText(
+                        &artist_utf, &self.format_body,
+                        &D2D_RECT_F { left: txt_x, top: art_top + 19.0, right: left_r, bottom: art_top + 35.0 } as *const _,
+                        &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL,
+                    );
 
-                    // Playback Seek Bar
-                    let seek_y = top_c + 46.0;
-                    let pos_secs = track.position_secs.max(0.0);
-                    let pos_mins = (pos_secs / 60.0).floor() as u32;
-                    let pos_rem = (pos_secs % 60.0).floor() as u32;
-                    let pos_str = format!("{:02}:{:02}", pos_mins, pos_rem);
+                    // Seek bar (compact, below art+text block)
+                    let seek_y     = top_c + 55.0;
+                    let pos_secs   = track.position_secs.max(0.0);
+                    let time_w     = 32.0;
+                    let pos_str    = format!("{:02}:{:02}", (pos_secs / 60.0).floor() as u32, (pos_secs % 60.0).floor() as u32);
                     let pos_utf: Vec<u16> = pos_str.encode_utf16().collect();
-
-                    let pos_rect = D2D_RECT_F { left: col_l, top: seek_y - 7.0, right: col_l + 34.0, bottom: seek_y + 7.0 };
-                    self.brush_time.SetOpacity(0.85 * alpha);
-                    self.d2d_context.DrawText(&pos_utf, &self.format_date, &pos_rect as *const _, &self.brush_time, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-
-                    let seek_left = col_l + 38.0;
-                    let seek_right = cx - 42.0;
-                    let seek_w = (seek_right - seek_left).max(10.0);
-                    let ratio = if track.duration_secs > 0.0 { (pos_secs / track.duration_secs).clamp(0.0, 1.0) } else { 0.0 };
-
-                    self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 * alpha });
-                    self.d2d_context.DrawLine(pt(seek_left, seek_y), pt(seek_right, seek_y), &self.brush_btn_bg, 3.0, None);
-
-                    let played_x = seek_left + ratio * seek_w;
-                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-                    self.brush_white.SetOpacity(0.95 * alpha);
-                    if ratio > 0.005 {
-                        self.d2d_context.DrawLine(pt(seek_left, seek_y), pt(played_x, seek_y), &self.brush_white, 3.0, None);
-                    }
-                    let thumb = D2D1_ELLIPSE { point: pt(played_x, seek_y), radiusX: 3.8, radiusY: 3.8 };
-                    self.d2d_context.FillEllipse(&thumb, &self.brush_white);
+                    self.brush_time.SetOpacity(0.78 * alpha);
+                    self.d2d_context.DrawText(
+                        &pos_utf, &self.format_date,
+                        &D2D_RECT_F { left: col_l, top: seek_y - 7.0, right: col_l + time_w, bottom: seek_y + 7.0 } as *const _,
+                        &self.brush_time, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL,
+                    );
 
                     let rem_str = if track.duration_secs > 0.0 {
-                        let rem_secs = (track.duration_secs - pos_secs).max(0.0);
-                        let rem_mins = (rem_secs / 60.0).floor() as u32;
-                        let rem_s = (rem_secs % 60.0).floor() as u32;
-                        format!("-{:02}:{:02}", rem_mins, rem_s)
-                    } else {
-                        "--:--".to_string()
-                    };
+                        let r = (track.duration_secs - pos_secs).max(0.0);
+                        format!("-{:02}:{:02}", (r / 60.0).floor() as u32, (r % 60.0).floor() as u32)
+                    } else { "--:--".to_string() };
                     let rem_utf: Vec<u16> = rem_str.encode_utf16().collect();
-                    let rem_rect = D2D_RECT_F { left: cx - 38.0, top: seek_y - 7.0, right: cx - 4.0, bottom: seek_y + 7.0 };
-                    self.d2d_context.DrawText(&rem_utf, &self.format_date, &rem_rect as *const _, &self.brush_time, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                    let rem_w = 36.0;
+                    self.d2d_context.DrawText(
+                        &rem_utf, &self.format_date,
+                        &D2D_RECT_F { left: left_r - rem_w, top: seek_y - 7.0, right: left_r, bottom: seek_y + 7.0 } as *const _,
+                        &self.brush_time, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL,
+                    );
 
-                    // Transport buttons + [💬] speech bubble
-                    let ctrl_y = top_c + 75.0;
+                    let sl   = col_l + time_w + 3.0;
+                    let sr   = left_r - rem_w - 3.0;
+                    let sw   = (sr - sl).max(8.0);
+                    let ratio = if track.duration_secs > 0.0 { (pos_secs / track.duration_secs).clamp(0.0, 1.0) } else { 0.0 };
+                    let px   = sl + ratio * sw;
 
-                    // Speech bubble [💬] highlighted in cyan
+                    self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.18 * alpha });
+                    self.d2d_context.DrawLine(pt(sl, seek_y), pt(sr, seek_y), &self.brush_btn_bg, 2.8, None);
+                    self.brush_accent.SetColor(&D2D1_COLOR_F { r: self.accent_color.0, g: self.accent_color.1, b: self.accent_color.2, a: 0.85 * alpha });
+                    if ratio > 0.005 { self.d2d_context.DrawLine(pt(sl, seek_y), pt(px, seek_y), &self.brush_accent, 2.8, None); }
+                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
+                    self.brush_white.SetOpacity(alpha);
+                    self.d2d_context.FillEllipse(&D2D1_ELLIPSE { point: pt(px, seek_y), radiusX: 4.0, radiusY: 4.0 }, &self.brush_white);
+
+                    // Transport buttons row (ctrl_y = top_c + 83.0, vertically centered between seek and bottom)
+                    let ctrl_y  = top_c + 83.0;
+                    let left_mid = (col_l + left_r) * 0.5;
+
+                    // Speech bubble [💬] — far left of this column, highlighted
                     self.draw_speech_bubble_icon(col_l + 8.0, ctrl_y, true, alpha);
 
-                    let btn_cx = (col_l + 24.0 + cx - 10.0) * 0.5;
+                    // Prev / Play / Next centered in remaining space [col_l+24 .. left_r]
+                    let btn_cx   = (col_l + 24.0 + left_r) * 0.5;
+                    let prev_cx  = btn_cx - 26.0;
+                    let next_cx  = btn_cx + 26.0;
 
-                    // Prev: btn_cx - 28.0
-                    let prev_cx = btn_cx - 28.0;
                     self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-                    self.brush_white.SetOpacity(0.85 * alpha);
+                    self.brush_white.SetOpacity(0.78 * alpha);
+                    // Prev
                     self.d2d_context.DrawLine(pt(prev_cx + 3.5, ctrl_y - 4.5), pt(prev_cx - 3.0, ctrl_y), &self.brush_white, 1.6, None);
                     self.d2d_context.DrawLine(pt(prev_cx + 3.5, ctrl_y + 4.5), pt(prev_cx - 3.0, ctrl_y), &self.brush_white, 1.6, None);
                     self.d2d_context.DrawLine(pt(prev_cx + 3.5, ctrl_y - 4.5), pt(prev_cx + 3.5, ctrl_y + 4.5), &self.brush_white, 1.6, None);
                     self.d2d_context.DrawLine(pt(prev_cx - 4.5, ctrl_y - 4.0), pt(prev_cx - 4.5, ctrl_y + 4.0), &self.brush_white, 1.6, None);
 
-                    // Play / Pause in Center: btn_cx
-                    let play_bg = D2D1_ELLIPSE { point: pt(btn_cx, ctrl_y), radiusX: 12.5, radiusY: 12.5 };
-                    self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 * alpha });
+                    // Play/Pause
+                    let play_bg = D2D1_ELLIPSE { point: pt(btn_cx, ctrl_y), radiusX: 12.0, radiusY: 12.0 };
+                    self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.14 * alpha });
                     self.d2d_context.FillEllipse(&play_bg, &self.brush_btn_bg);
-
                     self.brush_white.SetOpacity(0.95 * alpha);
                     let is_really_playing = island.current_track.as_ref().map(|t| t.is_playing).unwrap_or(island.is_media_playing);
                     if is_really_playing {
-                        self.d2d_context.DrawLine(pt(btn_cx - 2.5, ctrl_y - 4.2), pt(btn_cx - 2.5, ctrl_y + 4.2), &self.brush_white, 1.8, None);
-                        self.d2d_context.DrawLine(pt(btn_cx + 2.5, ctrl_y - 4.2), pt(btn_cx + 2.5, ctrl_y + 4.2), &self.brush_white, 1.8, None);
+                        self.d2d_context.DrawLine(pt(btn_cx - 2.8, ctrl_y - 4.5), pt(btn_cx - 2.8, ctrl_y + 4.5), &self.brush_white, 2.0, None);
+                        self.d2d_context.DrawLine(pt(btn_cx + 2.8, ctrl_y - 4.5), pt(btn_cx + 2.8, ctrl_y + 4.5), &self.brush_white, 2.0, None);
                     } else {
-                        self.d2d_context.DrawLine(pt(btn_cx - 2.8, ctrl_y - 4.5), pt(btn_cx + 4.0, ctrl_y), &self.brush_white, 1.6, None);
-                        self.d2d_context.DrawLine(pt(btn_cx - 2.8, ctrl_y + 4.5), pt(btn_cx + 4.0, ctrl_y), &self.brush_white, 1.6, None);
-                        self.d2d_context.DrawLine(pt(btn_cx - 2.8, ctrl_y - 4.5), pt(btn_cx - 2.8, ctrl_y + 4.5), &self.brush_white, 1.6, None);
+                        self.d2d_context.DrawLine(pt(btn_cx - 3.0, ctrl_y - 4.8), pt(btn_cx + 4.5, ctrl_y), &self.brush_white, 1.8, None);
+                        self.d2d_context.DrawLine(pt(btn_cx - 3.0, ctrl_y + 4.8), pt(btn_cx + 4.5, ctrl_y), &self.brush_white, 1.8, None);
+                        self.d2d_context.DrawLine(pt(btn_cx - 3.0, ctrl_y - 4.8), pt(btn_cx - 3.0, ctrl_y + 4.8), &self.brush_white, 1.8, None);
                     }
 
-                    // Next: btn_cx + 28.0
-                    let next_cx = btn_cx + 28.0;
-                    self.brush_white.SetOpacity(0.85 * alpha);
+                    // Next
+                    self.brush_white.SetOpacity(0.78 * alpha);
                     self.d2d_context.DrawLine(pt(next_cx - 3.5, ctrl_y - 4.5), pt(next_cx + 3.0, ctrl_y), &self.brush_white, 1.6, None);
                     self.d2d_context.DrawLine(pt(next_cx - 3.5, ctrl_y + 4.5), pt(next_cx + 3.0, ctrl_y), &self.brush_white, 1.6, None);
                     self.d2d_context.DrawLine(pt(next_cx - 3.5, ctrl_y - 4.5), pt(next_cx - 3.5, ctrl_y + 4.5), &self.brush_white, 1.6, None);
                     self.d2d_context.DrawLine(pt(next_cx + 4.5, ctrl_y - 4.0), pt(next_cx + 4.5, ctrl_y + 4.0), &self.brush_white, 1.6, None);
+                    let _ = left_mid; // suppress unused warning
                 } else {
-                    let disc_cx = col_l + 24.0;
-                    let disc_cy = top_c + 40.0;
-                    self.draw_spinning_vinyl(disc_cx, disc_cy, 20.0, 0.0, alpha * 0.6);
-
+                    // No track placeholder (left col)
+                    self.draw_spinning_vinyl(col_l + 22.0, top_c + 38.0, 20.0, 0.0, alpha * 0.5);
                     let no_title = "No Active Music".encode_utf16().collect::<Vec<u16>>();
-                    let nt_rect = D2D_RECT_F { left: col_l + 54.0, top: top_c + 24.0, right: cx - 10.0, bottom: top_c + 42.0 };
                     self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-                    self.brush_white.SetOpacity(0.90 * alpha);
-                    self.d2d_context.DrawText(&no_title, &self.format_title, &nt_rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
-
-                    let no_sub = "Play Spotify or YouTube".encode_utf16().collect::<Vec<u16>>();
-                    let ns_rect = D2D_RECT_F { left: col_l + 54.0, top: top_c + 42.0, right: cx - 10.0, bottom: top_c + 60.0 };
-                    self.brush_subtext.SetOpacity(0.70 * alpha);
-                    self.d2d_context.DrawText(&no_sub, &self.format_date, &ns_rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                    self.brush_white.SetOpacity(0.85 * alpha);
+                    self.d2d_context.DrawText(
+                        &no_title, &self.format_title,
+                        &D2D_RECT_F { left: col_l + 52.0, top: top_c + 22.0, right: split_x - 6.0, bottom: top_c + 40.0 } as *const _,
+                        &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL,
+                    );
                 }
 
-                // Right Column: Synced Lyrics (Spotify & Better Lyrics multiline view with wrap)
-                let lyr_label = "SYNCED LYRICS".encode_utf16().collect::<Vec<u16>>();
-                let ll_rect = D2D_RECT_F { left: col_r, top: top_c + 2.0, right: col_r + 76.0, bottom: top_c + 14.0 };
-                self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.38, g: 0.78, b: 1.0, a: 0.85 * alpha });
-                self.d2d_context.DrawText(&lyr_label, &self.format_tag, &ll_rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
+                // ---- Right Column: Synced Lyrics ----
+                // Header row: "SYNCED LYRICS"  [A/あ]  [Alt/Retry] (aligned with art_top at top_c + 7.0)
+                let hdr_top    = top_c + 7.0;
+                let hdr_bot    = top_c + 21.0;
+                let hdr_mid_y  = (hdr_top + hdr_bot) * 0.5;
 
-                // Quick Romaji Toggle Pill [A / あ] (col_r + 80.0 .. col_r + 128.0, top_c .. top_c + 16.0)
+                // "SYNCED LYRICS" label — left of lyrics column
+                let lyr_label = "SYNCED LYRICS".encode_utf16().collect::<Vec<u16>>();
+                self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.38, g: 0.78, b: 1.0, a: 0.85 * alpha });
+                self.d2d_context.DrawText(
+                    &lyr_label, &self.format_tag,
+                    &D2D_RECT_F { left: lyr_l, top: hdr_top, right: lyr_l + 78.0, bottom: hdr_bot } as *const _,
+                    &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL,
+                );
+
+                // Romaji pill  [A / あ]  — fixed width 44px, right-aligned before alt pill
+                let rom_w     = 44.0;
+                let cand_w    = 46.0;
+                let pill_gap  = 4.0;
+                let cand_r    = lyr_r;
+                let cand_l    = cand_r - cand_w;
+                let rom_r     = cand_l - pill_gap;
+                let rom_l     = rom_r - rom_w;
+
                 let rom_pill = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F { left: col_r + 80.0, top: top_c, right: col_r + 128.0, bottom: top_c + 16.0 },
-                    radiusX: 4.0,
-                    radiusY: 4.0,
+                    rect: D2D_RECT_F { left: rom_l, top: hdr_top, right: rom_r, bottom: hdr_bot },
+                    radiusX: 4.0, radiusY: 4.0,
                 };
                 if island.romanize_cjk_lyrics {
                     self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.38, g: 0.78, b: 1.0, a: 0.25 * alpha });
                     self.d2d_context.FillRoundedRectangle(&rom_pill, &self.brush_accent);
                     self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.50, g: 0.88, b: 1.0, a: 0.90 * alpha });
                     self.d2d_context.DrawRoundedRectangle(&rom_pill, &self.brush_accent, 1.0, None);
-                    let rom_txt = "A / あ".encode_utf16().collect::<Vec<u16>>();
+                    let rom_txt = "A/あ".encode_utf16().collect::<Vec<u16>>();
                     self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.55, g: 0.90, b: 1.0, a: 0.95 * alpha });
                     self.d2d_context.DrawText(&rom_txt, &self.format_pill_tag, &rom_pill.rect as *const _, &self.brush_accent, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 } else {
                     self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 * alpha });
                     self.d2d_context.FillRoundedRectangle(&rom_pill, &self.brush_white);
-                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.25 * alpha });
+                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.22 * alpha });
                     self.d2d_context.DrawRoundedRectangle(&rom_pill, &self.brush_white, 1.0, None);
-                    let rom_txt = "A / あ".encode_utf16().collect::<Vec<u16>>();
-                    self.brush_subtext.SetOpacity(0.70 * alpha);
+                    let rom_txt = "A/あ".encode_utf16().collect::<Vec<u16>>();
+                    self.brush_subtext.SetOpacity(0.65 * alpha);
                     self.d2d_context.DrawText(&rom_txt, &self.format_pill_tag, &rom_pill.rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 }
 
-                // Candidate Switcher Pill [1/N Alt] or [Retry] (col_r + 134.0 .. col_r + 184.0, top_c .. top_c + 16.0)
+                // Alt/Retry pill — right edge of lyrics column
                 let total_cand = island.lyrics_candidates.len();
                 let cand_label = if total_cand > 1 {
                     format!("{}/{} Alt", island.active_candidate_idx + 1, total_cand)
@@ -2520,53 +2553,41 @@ impl Renderer {
                     "Retry".to_string()
                 };
                 let cand_pill = D2D1_ROUNDED_RECT {
-                    rect: D2D_RECT_F { left: col_r + 134.0, top: top_c, right: col_r + 184.0, bottom: top_c + 16.0 },
-                    radiusX: 4.0,
-                    radiusY: 4.0,
+                    rect: D2D_RECT_F { left: cand_l, top: hdr_top, right: cand_r, bottom: hdr_bot },
+                    radiusX: 4.0, radiusY: 4.0,
                 };
                 self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.08 * alpha });
                 self.d2d_context.FillRoundedRectangle(&cand_pill, &self.brush_white);
+                let cand_txt = cand_label.encode_utf16().collect::<Vec<u16>>();
                 if total_cand > 1 {
                     self.brush_accent.SetColor(&D2D1_COLOR_F { r: 0.45, g: 0.78, b: 1.0, a: 0.40 * alpha });
                     self.d2d_context.DrawRoundedRectangle(&cand_pill, &self.brush_accent, 1.0, None);
-                    let cand_txt = cand_label.encode_utf16().collect::<Vec<u16>>();
                     self.brush_white.SetColor(&D2D1_COLOR_F { r: 0.88, g: 0.92, b: 1.0, a: 0.90 * alpha });
                     self.d2d_context.DrawText(&cand_txt, &self.format_pill_tag, &cand_pill.rect as *const _, &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 } else {
-                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.25 * alpha });
+                    self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.22 * alpha });
                     self.d2d_context.DrawRoundedRectangle(&cand_pill, &self.brush_white, 1.0, None);
-                    let cand_txt = cand_label.encode_utf16().collect::<Vec<u16>>();
-                    self.brush_subtext.SetOpacity(0.70 * alpha);
+                    self.brush_subtext.SetOpacity(0.65 * alpha);
                     self.d2d_context.DrawText(&cand_txt, &self.format_pill_tag, &cand_pill.rect as *const _, &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL);
                 }
+                let _ = hdr_mid_y; // suppress unused warning
 
-                let (prev_line_opt, curr_line_str, next_line_opt, _line_progress, fade_alpha) = if let Some(ref lyrics) = island.current_lyrics {
-                    let pos = island.current_track.as_ref().map(|t| t.position_secs).unwrap_or(0.0);
+                // --- Lyric area layout ---
+                // prev:  top_c+24 .. top_c+38   (14px, 11.5pt no-wrap, dimmed 38%)
+                // curr:  top_c+40 .. top_c+76   (36px, 14.5pt bold wrap → fits 2 lines comfortably)
+                // next:  top_c+78 .. top_c+92   (14px, 11.5pt no-wrap, dimmed 38%)
+                let (prev_line_opt, curr_line_str, next_line_opt, _lp, fade_alpha) = if let Some(ref lyrics) = island.current_lyrics {
+                    let pos  = island.current_track.as_ref().map(|t| t.position_secs).unwrap_or(0.0);
                     let info = lyrics.get_active_line_info(pos, island.romanize_cjk_lyrics);
                     let c = if info.curr == "•••" {
                         if lyrics.lines.is_empty() {
-                            if island.lyrics_loading {
-                                "Syncing lyrics..."
-                            } else {
-                                "No synced lyrics found"
-                            }
-                        } else if info.prev.is_none() {
-                            "••• Instrumental Intro •••"
-                        } else {
-                            "••• Instrumental Break •••"
-                        }
-                    } else {
-                        info.curr
-                    };
+                            if island.lyrics_loading { "Syncing lyrics..." } else { "No synced lyrics found" }
+                        } else if info.prev.is_none() { "••• Instrumental Intro •••" } else { "••• Instrumental Break •••" }
+                    } else { info.curr };
                     let sub = if lyrics.lines.is_empty() {
-                        if island.lyrics_loading {
-                            Some("Searching LRCLIB database...".to_string())
-                        } else {
-                            Some("Click to retry search".to_string())
-                        }
-                    } else {
-                        info.next.map(|s| s.to_string())
-                    };
+                        if island.lyrics_loading { Some("Searching LRCLIB database...".to_string()) }
+                        else { Some("Click to retry search".to_string()) }
+                    } else { info.next.map(|s| s.to_string()) };
                     (info.prev.map(|s| s.to_string()), c.to_string(), sub, info.progress, info.fade_alpha)
                 } else if island.lyrics_loading {
                     (None, "Syncing lyrics...".to_string(), Some("Searching LRCLIB database...".to_string()), 0.0, 1.0)
@@ -2576,102 +2597,72 @@ impl Renderer {
                     (None, "Play music to see lyrics".to_string(), None, 0.0, 1.0)
                 };
 
-                let lyrics_box = D2D_RECT_F {
-                    left: col_r,
-                    top: top_c + 12.0,
-                    right: right_c,
-                    bottom: top_c + 74.0,
-                };
-                self.d2d_context.PushAxisAlignedClip(&lyrics_box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+                // Clip to full lyrics area
+                let clip_box = D2D_RECT_F { left: lyr_l, top: top_c + 22.0, right: lyr_r, bottom: top_c + 94.0 };
+                self.d2d_context.PushAxisAlignedClip(&clip_box, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
 
-                // 1. Previous Line (Top, Dimmed Subtitle)
+                // Previous line — 14px strip, dimmed, single line no-wrap
                 if let Some(prev) = prev_line_opt {
                     let prev_utf: Vec<u16> = prev.encode_utf16().collect();
-                    let p_rect = D2D_RECT_F {
-                        left: col_r,
-                        top: top_c + 12.0,
-                        right: right_c,
-                        bottom: top_c + 27.0,
-                    };
-                    self.brush_subtext.SetOpacity(0.45 * alpha);
+                    self.brush_subtext.SetOpacity(0.38 * alpha);
                     self.d2d_context.DrawText(
-                        &prev_utf,
-                        &self.format_lyrics_sub,
-                        &p_rect as *const _,
-                        &self.brush_subtext,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        DWRITE_MEASURING_MODE_NATURAL,
+                        &prev_utf, &self.format_lyrics_sub,
+                        &D2D_RECT_F { left: lyr_l, top: top_c + 24.0, right: lyr_r, bottom: top_c + 38.0 } as *const _,
+                        &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL,
                     );
                 }
 
-                // 2. Active Current Line (Center, Large Bold White with organic fade)
+                // Current line — 36px height (14.5pt bold, 2 lines wrap)
                 let cur_utf: Vec<u16> = curr_line_str.encode_utf16().collect();
-                let cur_rect = D2D_RECT_F {
-                    left: col_r,
-                    top: top_c + 28.0,
-                    right: right_c,
-                    bottom: top_c + 54.0,
-                };
                 self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-                self.brush_white.SetOpacity((0.80 + 0.20 * fade_alpha) * alpha);
+                self.brush_white.SetOpacity((0.75 + 0.25 * fade_alpha) * alpha);
                 self.d2d_context.DrawText(
-                    &cur_utf,
-                    &self.format_lyrics,
-                    &cur_rect as *const _,
-                    &self.brush_white,
-                    D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                    DWRITE_MEASURING_MODE_NATURAL,
+                    &cur_utf, &self.format_lyrics,
+                    &D2D_RECT_F { left: lyr_l, top: top_c + 40.0, right: lyr_r, bottom: top_c + 76.0 } as *const _,
+                    &self.brush_white, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL,
                 );
 
-                // 3. Next Line (Bottom, Dimmed Subtitle)
+                // Next line — 14px strip, dimmed, single line no-wrap
                 if let Some(next) = next_line_opt {
                     let next_utf: Vec<u16> = next.encode_utf16().collect();
-                    let n_rect = D2D_RECT_F {
-                        left: col_r,
-                        top: top_c + 55.0,
-                        right: right_c,
-                        bottom: top_c + 70.0,
-                    };
-                    self.brush_subtext.SetOpacity(0.45 * alpha);
+                    self.brush_subtext.SetOpacity(0.38 * alpha);
                     self.d2d_context.DrawText(
-                        &next_utf,
-                        &self.format_lyrics_sub,
-                        &n_rect as *const _,
-                        &self.brush_subtext,
-                        D2D1_DRAW_TEXT_OPTIONS_CLIP,
-                        DWRITE_MEASURING_MODE_NATURAL,
+                        &next_utf, &self.format_lyrics_sub,
+                        &D2D_RECT_F { left: lyr_l, top: top_c + 78.0, right: lyr_r, bottom: top_c + 92.0 } as *const _,
+                        &self.brush_subtext, D2D1_DRAW_TEXT_OPTIONS_CLIP, DWRITE_MEASURING_MODE_NATURAL,
                     );
                 }
 
                 self.d2d_context.PopAxisAlignedClip();
 
-                // Volume Control Slider on bottom right
-                let vol_y = top_c + 75.0;
-                let spk_x = col_r + 8.0;
+                // --- Volume slider row (top_c+98.0) — right column only ---
+                let vol_y      = top_c + 98.0;
+                let spk_x      = lyr_l + 6.0;
                 self.brush_white.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-                self.brush_white.SetOpacity(0.75 * alpha);
-                self.d2d_context.DrawLine(pt(spk_x - 3.0, vol_y - 2.0), pt(spk_x - 1.0, vol_y - 2.0), &self.brush_white, 1.2, None);
-                self.d2d_context.DrawLine(pt(spk_x - 1.0, vol_y - 2.0), pt(spk_x + 2.0, vol_y - 4.5), &self.brush_white, 1.2, None);
-                self.d2d_context.DrawLine(pt(spk_x + 2.0, vol_y - 4.5), pt(spk_x + 2.0, vol_y + 4.5), &self.brush_white, 1.2, None);
-                self.d2d_context.DrawLine(pt(spk_x + 2.0, vol_y + 4.5), pt(spk_x - 1.0, vol_y + 2.0), &self.brush_white, 1.2, None);
-                self.d2d_context.DrawLine(pt(spk_x - 1.0, vol_y + 2.0), pt(spk_x - 3.0, vol_y + 2.0), &self.brush_white, 1.2, None);
-                self.d2d_context.DrawLine(pt(spk_x - 3.0, vol_y - 2.0), pt(spk_x - 3.0, vol_y + 2.0), &self.brush_white, 1.2, None);
+                self.brush_white.SetOpacity(0.60 * alpha);
+                self.d2d_context.DrawLine(pt(spk_x - 3.0, vol_y - 2.0), pt(spk_x - 1.0, vol_y - 2.0), &self.brush_white, 1.1, None);
+                self.d2d_context.DrawLine(pt(spk_x - 1.0, vol_y - 2.0), pt(spk_x + 2.5, vol_y - 4.5), &self.brush_white, 1.1, None);
+                self.d2d_context.DrawLine(pt(spk_x + 2.5, vol_y - 4.5), pt(spk_x + 2.5, vol_y + 4.5), &self.brush_white, 1.1, None);
+                self.d2d_context.DrawLine(pt(spk_x + 2.5, vol_y + 4.5), pt(spk_x - 1.0, vol_y + 2.0), &self.brush_white, 1.1, None);
+                self.d2d_context.DrawLine(pt(spk_x - 1.0, vol_y + 2.0), pt(spk_x - 3.0, vol_y + 2.0), &self.brush_white, 1.1, None);
+                self.d2d_context.DrawLine(pt(spk_x - 3.0, vol_y - 2.0), pt(spk_x - 3.0, vol_y + 2.0), &self.brush_white, 1.1, None);
 
-                let vol_left = col_r + 18.0;
-                let vol_right = right_c - 10.0;
-                let vol_w = vol_right - vol_left;
-                let vol_val = island.volume.clamp(0.0, 1.0);
-
+                let vol_left   = lyr_l + 16.0;
+                let vol_right  = lyr_r - 4.0;
+                let vol_w      = vol_right - vol_left;
+                let vol_val    = island.volume.clamp(0.0, 1.0);
                 self.brush_btn_bg.SetColor(&D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 0.16 * alpha });
-                self.d2d_context.DrawLine(pt(vol_left, vol_y), pt(vol_right, vol_y), &self.brush_btn_bg, 3.0, None);
-
+                self.d2d_context.DrawLine(pt(vol_left, vol_y), pt(vol_right, vol_y), &self.brush_btn_bg, 2.8, None);
                 let vol_fill_x = vol_left + vol_val * vol_w;
-                self.brush_white.SetOpacity(0.90 * alpha);
+                self.brush_white.SetOpacity(0.85 * alpha);
                 if vol_val > 0.02 {
-                    self.d2d_context.DrawLine(pt(vol_left, vol_y), pt(vol_fill_x, vol_y), &self.brush_white, 3.0, None);
+                    self.d2d_context.DrawLine(pt(vol_left, vol_y), pt(vol_fill_x, vol_y), &self.brush_white, 2.8, None);
                 }
-                let vol_thumb = D2D1_ELLIPSE { point: pt(vol_fill_x, vol_y), radiusX: 3.8, radiusY: 3.8 };
-                self.d2d_context.FillEllipse(&vol_thumb, &self.brush_white);
+                self.d2d_context.FillEllipse(
+                    &D2D1_ELLIPSE { point: pt(vol_fill_x, vol_y), radiusX: 3.8, radiusY: 3.8 },
+                    &self.brush_white,
+                );
+                let _ = content_w; // suppress unused warning
             }
         }
     }

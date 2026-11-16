@@ -36,7 +36,7 @@ use windows::{
     core::*,
     Win32::{
         Foundation::*,
-        Graphics::Gdi::{SetWindowRgn, HBRUSH},
+        Graphics::Gdi::{CreateRectRgn, SetWindowRgn, HBRUSH},
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
@@ -93,14 +93,73 @@ struct AppState {
     volume_sync_timer: f32,
 }
 
-/// Ensures no restrictive GDI clipping region is applied to the HWND.
-/// True per-pixel transparency and click-through are handled by DirectComposition
-/// and WM_NCHITTEST with zero visual cropping and zero jagged clipping.
+/// Dynamically updates the GDI window clipping rectangle (CreateRectRgn) around the active island.
+/// Outside this rectangular bounding box, pixels physically DO NOT EXIST to the OS Window Manager,
+/// giving 100% unimpeded click-through to underlying Chrome tabs, URL bars, close buttons, etc.!
+/// Uses a generous rectangular bounding box with pre-expansion so Direct2D rounded corners,
+/// soft ambient glow, and spring animations are NEVER clipped or cropped, with zero micro-stutter.
 fn sync_window_region(hwnd: HWND, state: &mut AppState) {
-    if state.last_rgn_rect != (0, 0, 0, 0) {
-        state.last_rgn_rect = (0, 0, 0, 0);
+    // 1. Pure idle clock notch with click-through enabled:
+    if state.config.idle_click_through
+        && state.island.mode == island::IslandMode::Idle
+        && !state.island.is_media_playing
+        && state.island.current_track.is_none()
+        && state.island.active_notification.is_none()
+    {
+        let cur = (0, 0, 0, 0);
+        if state.last_rgn_rect != cur {
+            state.last_rgn_rect = cur;
+            unsafe {
+                let empty_rgn = CreateRectRgn(0, 0, 0, 0);
+                let _ = SetWindowRgn(hwnd, Some(empty_rgn), false);
+            }
+        }
+        return;
+    }
+
+    // 2. Pre-expanded bounding box logic:
+    // When expanding (target > current), immediately jump effective width/height to target on frame 1.
+    // This updates the OS GDI window clipping region in exactly 1 call before the visual animation begins.
+    // During subsequent frames, effective_w/h remains constant at target, requiring ZERO calls to SetWindowRgn
+    // (zero DWM recomposition overhead, zero micro-stutter, and zero cropping!).
+    // When shrinking (current > target + 4.0), keep the wider bounds until the spring completely settles.
+    let is_shrinking = state.island.width_spring.current > (state.island.width_spring.target + 4.0)
+        || state.island.height_spring.current > (state.island.height_spring.target + 4.0);
+
+    let (effective_w, effective_h) = if is_shrinking {
+        let is_moving = state.island.width_spring.velocity.abs() > 3.0
+            || state.island.height_spring.velocity.abs() > 3.0;
+        if is_moving {
+            return;
+        }
+        (
+            state.island.width_spring.target,
+            state.island.height_spring.target,
+        )
+    } else {
+        (
+            state.island.width_spring.current.max(state.island.width_spring.target),
+            state.island.height_spring.current.max(state.island.height_spring.target),
+        )
+    };
+
+    let effective_y = state.island.y_spring.current.min(state.island.y_spring.target);
+    let bottom_y = state.island.y_spring.current.max(state.island.y_spring.target) + effective_h;
+
+    let pad = 20.0f32;
+    let left = (WINDOW_WIDTH as f32 - effective_w) * 0.5;
+
+    let l = (left - pad).round().max(0.0) as i32;
+    let t = (effective_y - pad).round().max(0.0) as i32;
+    let r = (left + effective_w + pad).round().min(WINDOW_WIDTH as f32) as i32;
+    let b = (bottom_y + pad).round().min(WINDOW_HEIGHT as f32) as i32;
+
+    let cur = (l, t, r, b);
+    if state.last_rgn_rect != cur {
+        state.last_rgn_rect = cur;
         unsafe {
-            let _ = SetWindowRgn(hwnd, None, false);
+            let rgn = CreateRectRgn(l, t, r, b);
+            let _ = SetWindowRgn(hwnd, Some(rgn), false);
         }
     }
 }
@@ -409,7 +468,7 @@ unsafe extern "system" fn wndproc(
 
                             if !state.island.show_lyrics {
                                 // Full-Width Player Mode
-                                let seek_y = top_c + 49.0;
+                                let seek_y = top_c + 57.0;
                                 let seek_left = col_l + 42.0;
                                 let seek_right = right_c - 46.0;
 
@@ -426,7 +485,7 @@ unsafe extern "system" fn wndproc(
                                     return LRESULT(0);
                                 }
 
-                                let ctrl_y = top_c + 78.0;
+                                let ctrl_y = top_c + 83.0;
 
                                 // Speech bubble lyrics toggle button [💬] at col_l + 10.0, ctrl_y
                                 let dist_speech = ((mouse_x - (col_l + 10.0)).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
@@ -488,7 +547,7 @@ unsafe extern "system" fn wndproc(
                                 }
 
                                 // Click album art / title: focus music player
-                                if mouse_x >= col_l && mouse_x <= col_l + 48.0 && mouse_y >= top_c && mouse_y <= top_c + 50.0 {
+                                if mouse_x >= col_l && mouse_x <= col_l + 48.0 && mouse_y >= top_c + 4.0 && mouse_y <= top_c + 54.0 {
                                     crate::media::activate_or_toggle_media_player(state.island.current_track.as_ref());
                                     return LRESULT(0);
                                 }
@@ -497,7 +556,7 @@ unsafe extern "system" fn wndproc(
                                 let col_r = cx + 12.0;
 
                                 // Seek bar in left column
-                                let seek_y = top_c + 46.0;
+                                let seek_y = top_c + 55.0;
                                 let seek_left = col_l + 38.0;
                                 let seek_right = cx - 42.0;
                                 if mouse_y >= seek_y - 10.0 && mouse_y <= seek_y + 10.0 && mouse_x >= seek_left && mouse_x <= seek_right {
@@ -513,10 +572,10 @@ unsafe extern "system" fn wndproc(
                                 }
 
                                 // Volume slider on right column
-                                let vol_y = top_c + 75.0;
+                                let vol_y = top_c + 98.0;
                                 let vol_left = col_r + 18.0;
                                 let vol_right = right_c - 10.0;
-                                if mouse_y >= vol_y - 10.0 && mouse_y <= vol_y + 10.0 && mouse_x >= vol_left && mouse_x <= vol_right {
+                                if mouse_y >= vol_y - 12.0 && mouse_y <= vol_y + 12.0 && mouse_x >= vol_left && mouse_x <= vol_right {
                                     state.dragging_volume = true;
                                     let ratio = ((mouse_x - vol_left) / (vol_right - vol_left)).clamp(0.0, 1.0);
                                     state.island.volume = ratio;
@@ -526,7 +585,7 @@ unsafe extern "system" fn wndproc(
                                     return LRESULT(0);
                                 }
 
-                                let ctrl_y = top_c + 75.0;
+                                let ctrl_y = top_c + 83.0;
 
                                 // Speech bubble lyrics toggle button [💬] at col_l + 8.0: toggles back to full-width!
                                 let dist_speech = ((mouse_x - (col_l + 8.0)).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
@@ -538,9 +597,9 @@ unsafe extern "system" fn wndproc(
 
                                 // Transport buttons in left column
                                 let btn_cx = (col_l + 24.0 + cx - 10.0) * 0.5;
-                                let prev_cx = btn_cx - 28.0;
+                                let prev_cx = btn_cx - 26.0;
                                 let play_cx = btn_cx;
-                                let next_cx = btn_cx + 28.0;
+                                let next_cx = btn_cx + 26.0;
 
                                 let dist_prev = ((mouse_x - prev_cx).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
                                 let dist_play = ((mouse_x - play_cx).powi(2) + (mouse_y - ctrl_y).powi(2)).sqrt();
@@ -560,8 +619,9 @@ unsafe extern "system" fn wndproc(
                                     return LRESULT(0);
                                 }
 
-                                // 1. Quick Romaji Toggle Pill [A / あ] (col_r + 80.0 .. col_r + 128.0)
-                                if mouse_x >= col_r + 78.0 && mouse_x <= col_r + 130.0 && mouse_y >= top_c - 2.0 && mouse_y <= top_c + 18.0 {
+                                // 1. Quick Romaji Toggle Pill [A / あ] (right_c - 94.0 .. right_c - 50.0)
+                                let hdr_top = top_c + 7.0;
+                                if mouse_x >= right_c - 96.0 && mouse_x <= right_c - 48.0 && mouse_y >= hdr_top - 4.0 && mouse_y <= hdr_top + 18.0 {
                                     state.island.romanize_cjk_lyrics = !state.island.romanize_cjk_lyrics;
                                     state.config.romanize_cjk_lyrics = state.island.romanize_cjk_lyrics;
                                     state.config.save();
@@ -569,8 +629,8 @@ unsafe extern "system" fn wndproc(
                                     return LRESULT(0);
                                 }
 
-                                // 2. Candidate Switcher / Retry Pill [1/N Alt] or [Retry] (col_r + 134.0 .. col_r + 184.0)
-                                if mouse_x >= col_r + 132.0 && mouse_x <= col_r + 186.0 && mouse_y >= top_c - 2.0 && mouse_y <= top_c + 18.0 {
+                                // 2. Candidate Switcher / Retry Pill [1/N Alt] or [Retry] (right_c - 46.0 .. right_c)
+                                if mouse_x >= right_c - 48.0 && mouse_x <= right_c + 4.0 && mouse_y >= hdr_top - 4.0 && mouse_y <= hdr_top + 18.0 {
                                     if state.island.lyrics_candidates.len() > 1 {
                                         state.island.cycle_lyrics_candidate();
                                     } else {
