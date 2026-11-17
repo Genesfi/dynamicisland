@@ -854,6 +854,191 @@ fn fetch_qq_candidates(
     candidates
 }
 
+// =========================================================================
+// Apple TTML & BiniLyrics / BetterLyrics Providers
+// =========================================================================
+
+fn parse_ttml_time(text: &str) -> Option<f32> {
+    let t = text.trim();
+    if let Some(ms) = t.strip_suffix("ms") {
+        return ms.trim().parse::<f32>().ok().map(|v| v / 1000.0);
+    }
+    let t = t.strip_suffix('s').unwrap_or(t);
+    if t.contains(':') {
+        let mut secs = 0.0f32;
+        for part in t.split(':') {
+            secs = secs * 60.0 + part.trim().parse::<f32>().ok()?;
+        }
+        Some(secs)
+    } else {
+        t.parse::<f32>().ok()
+    }
+}
+
+pub fn parse_ttml(ttml_text: &str, title: &str, artist: &str) -> SongLyrics {
+    let mut lines = Vec::new();
+    let mut rest = ttml_text;
+
+    while let Some(p_start) = rest.find("<p ") {
+        let p_content = &rest[p_start..];
+        let Some(p_end) = p_content.find("</p>") else { break };
+        let p_str = &p_content[..p_end];
+        rest = &p_content[p_end + 4..];
+
+        // Extract begin="xxx"
+        if let Some(begin_idx) = p_str.find("begin=\"") {
+            let after_begin = &p_str[begin_idx + 7..];
+            if let Some(quote_end) = after_begin.find('"') {
+                let time_str = &after_begin[..quote_end];
+                if let Some(secs) = parse_ttml_time(time_str) {
+                    let inner = if let Some(tag_close) = p_str.find('>') {
+                        &p_str[tag_close + 1..]
+                    } else {
+                        ""
+                    };
+
+                    // Strip any XML tags like <span ...> or </span>
+                    let mut clean_text = String::new();
+                    let mut inside_tag = false;
+                    for ch in inner.chars() {
+                        if ch == '<' {
+                            inside_tag = true;
+                        } else if ch == '>' {
+                            inside_tag = false;
+                        } else if !inside_tag {
+                            clean_text.push(ch);
+                        }
+                    }
+
+                    let clean_text = clean_text
+                        .replace("&amp;", "&")
+                        .replace("&lt;", "<")
+                        .replace("&gt;", ">")
+                        .replace("&quot;", "\"")
+                        .replace("&apos;", "'");
+                    let text = clean_text.split_whitespace().collect::<Vec<_>>().join(" ");
+
+                    if !text.is_empty() {
+                        let romaji = if crate::transliterate::contains_cjk(&text) {
+                            Some(crate::transliterate::romanize_line(&text))
+                        } else {
+                            None
+                        };
+                        lines.push(LyricLine {
+                            time_secs: secs,
+                            text,
+                            romaji_text: romaji,
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    lines.sort_by(|a, b| a.time_secs.partial_cmp(&b.time_secs).unwrap_or(std::cmp::Ordering::Equal));
+    let has_cjk = lines.iter().any(|l| l.romaji_text.is_some());
+
+    SongLyrics {
+        title: title.to_string(),
+        artist: artist.to_string(),
+        lines,
+        is_instrumental: false,
+        has_cjk,
+        raw_lrc: ttml_text.to_string(),
+        candidate_info: String::new(),
+        candidates: Vec::new(),
+    }
+}
+
+fn fetch_bini_candidates(
+    clean_title: &str,
+    clean_artist: &str,
+    original_title: &str,
+    original_artist: &str,
+    target_duration: f32,
+) -> Vec<SongLyrics> {
+    let dur_int = target_duration.round() as i32;
+    let url = format!(
+        "https://lyrics-api.binimum.org/?track={}&artist={}&duration={}",
+        url_encode(clean_title),
+        url_encode(clean_artist),
+        dur_int
+    );
+    let mut candidates = Vec::new();
+    let Some(json_resp) = fetch_url_string(&url) else { return candidates };
+    let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_resp) else { return candidates };
+    let Some(results) = val.get("results").and_then(|r| r.as_array()) else { return candidates };
+
+    for hit in results.iter().take(3) {
+        let Some(lyrics_url) = hit.get("lyricsUrl").and_then(|u| u.as_str()) else { continue };
+        let hit_artist = hit.get("artist").and_then(|a| a.as_str()).unwrap_or(original_artist);
+        let hit_dur = hit.get("duration").and_then(|d| d.as_f64()).unwrap_or(target_duration as f64) as f32;
+        let mins = (hit_dur / 60.0).floor() as u32;
+        let secs = (hit_dur % 60.0).round() as u32;
+
+        if let Some(raw_content) = fetch_url_string(lyrics_url) {
+            let mut parsed = if raw_content.contains("<p ") || raw_content.contains("<tt ") {
+                parse_ttml(&raw_content, original_title, original_artist)
+            } else {
+                parse_lrc(&raw_content, original_title, original_artist)
+            };
+            if !parsed.lines.is_empty() {
+                parsed.candidate_info = format!("{} [BiniLyrics] ({}:{:02})", hit_artist, mins, secs);
+                candidates.push(parsed);
+                break;
+            }
+        }
+    }
+    candidates
+}
+
+fn fetch_better_lyrics_candidates(
+    clean_title: &str,
+    clean_artist: &str,
+    original_title: &str,
+    original_artist: &str,
+    target_duration: f32,
+) -> Vec<SongLyrics> {
+    let dur_int = target_duration.round() as i32;
+    let url = format!(
+        "https://lyrics-api.boidu.dev/getLyrics?s={}&a={}&d={}",
+        url_encode(clean_title),
+        url_encode(clean_artist),
+        dur_int
+    );
+    let mut candidates = Vec::new();
+    let Some(raw_resp) = fetch_url_string(&url) else { return candidates };
+    let mins = (target_duration / 60.0).floor() as u32;
+    let secs = (target_duration % 60.0).round() as u32;
+
+    let content = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_resp) {
+        if let Some(ttml) = val.get("ttml").and_then(|t| t.as_str()) {
+            Some(ttml.to_string())
+        } else if let Some(synced) = val.get("syncedLyrics").and_then(|s| s.as_str()) {
+            Some(synced.to_string())
+        } else if let Some(lrc) = val.get("lyrics").and_then(|l| l.as_str()) {
+            Some(lrc.to_string())
+        } else {
+            None
+        }
+    } else {
+        Some(raw_resp)
+    };
+
+    if let Some(text) = content {
+        let mut parsed = if text.contains("<p ") || text.contains("<tt ") {
+            parse_ttml(&text, original_title, original_artist)
+        } else {
+            parse_lrc(&text, original_title, original_artist)
+        };
+        if !parsed.lines.is_empty() {
+            parsed.candidate_info = format!("{} [BetterLyrics] ({}:{:02})", original_artist, mins, secs);
+            candidates.push(parsed);
+        }
+    }
+    candidates
+}
+
 fn score_candidate(
     cand: &LrclibResponse,
     target_title: &str,
@@ -1223,30 +1408,40 @@ pub fn fetch_lyrics_async(
             }
         }
 
-        // NetEase Cloud Music Fallback:
-        // ONLY query NetEase if LRCLIB found NO synced lyrics at all!
-        let has_synced_lrclib = parsed_candidates.iter().any(|c| !c.lines.is_empty());
-        if !has_synced_lrclib {
-            let netease_cands = fetch_netease_candidates(
-                &clean_title,
-                &clean_artist,
-                &title,
-                &artist,
-                duration_secs,
-            );
+        // Query BiniLyrics & BetterLyrics (TTML word-synced) and NetEase:
+        let bini_cands = fetch_bini_candidates(
+            &clean_title,
+            &clean_artist,
+            &title,
+            &artist,
+            duration_secs,
+        );
 
-            if !netease_cands.is_empty() {
-                let old_lrclib = std::mem::replace(&mut parsed_candidates, netease_cands);
-                for item in old_lrclib {
-                    parsed_candidates.push(item);
-                }
-            }
-        }
+        let better_cands = fetch_better_lyrics_candidates(
+            &clean_title,
+            &clean_artist,
+            &title,
+            &artist,
+            duration_secs,
+        );
 
-        // QQ Music Fallback (BetterLyrics Potato backend):
-        // If neither LRCLIB nor NetEase found synced lyrics, query QQ Music!
-        let has_synced_after_netease = parsed_candidates.iter().any(|c| !c.lines.is_empty());
-        if !has_synced_after_netease {
+        let netease_cands = fetch_netease_candidates(
+            &clean_title,
+            &clean_artist,
+            &title,
+            &artist,
+            duration_secs,
+        );
+
+        let mut all_candidates: Vec<SongLyrics> = Vec::new();
+        all_candidates.extend(bini_cands);
+        all_candidates.extend(better_cands);
+        all_candidates.extend(netease_cands);
+        all_candidates.extend(parsed_candidates);
+
+        // Fallback: If still no synced lyrics found from any above, query QQ Music and KuGou
+        let has_synced_so_far = all_candidates.iter().any(|c| !c.lines.is_empty());
+        if !has_synced_so_far {
             let qq_cands = fetch_qq_candidates(
                 &clean_title,
                 &clean_artist,
@@ -1254,19 +1449,8 @@ pub fn fetch_lyrics_async(
                 &artist,
                 duration_secs,
             );
+            all_candidates.extend(qq_cands);
 
-            if !qq_cands.is_empty() {
-                let old_cands = std::mem::replace(&mut parsed_candidates, qq_cands);
-                for item in old_cands {
-                    parsed_candidates.push(item);
-                }
-            }
-        }
-
-        // KuGou Music Fallback:
-        // If neither LRCLIB, NetEase, nor QQ Music found synced lyrics, query KuGou!
-        let has_synced_so_far = parsed_candidates.iter().any(|c| !c.lines.is_empty());
-        if !has_synced_so_far {
             let kugou_cands = fetch_kugou_candidates(
                 &clean_title,
                 &clean_artist,
@@ -1274,14 +1458,10 @@ pub fn fetch_lyrics_async(
                 &artist,
                 duration_secs,
             );
-
-            if !kugou_cands.is_empty() {
-                let old_cands = std::mem::replace(&mut parsed_candidates, kugou_cands);
-                for item in old_cands {
-                    parsed_candidates.push(item);
-                }
-            }
+            all_candidates.extend(kugou_cands);
         }
+
+        let parsed_candidates = all_candidates;
 
         let final_lyrics = if let Some(first) = parsed_candidates.first() {
             let mut top = first.clone();

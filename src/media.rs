@@ -105,8 +105,8 @@ fn get_best_media_session(
                 .map(|h| h.to_string().to_lowercase())
                 .unwrap_or_default();
 
-            // Highest priority to Tauri YTM, Spotify, Apple Music
-            if source.contains("tauri") || source.contains("ytm") {
+            // Highest priority to Tauri YTM, NabyTune, Spotify, Apple Music
+            if source.contains("tauri") || source.contains("ytm") || source.contains("nabytune") {
                 score += 250;
             } else if source.contains("spotify") {
                 score += 200;
@@ -738,7 +738,7 @@ pub fn detect_media_service(
     if lower_src.contains("netflix") || lower_title.contains("netflix") || lower_artist.contains("netflix") || lower_album.contains("netflix") {
         return ("Netflix".to_string(), (0.898, 0.035, 0.078));
     }
-    if lower_src.contains("tauri") || lower_src.contains("ytm") {
+    if lower_src.contains("tauri") || lower_src.contains("ytm") || lower_src.contains("nabytune") {
         return ("YouTube Music".to_string(), (0.95, 0.10, 0.10));
     }
     if lower_src.contains("applemusic") || lower_src.contains("cider") {
@@ -941,8 +941,8 @@ unsafe extern "system" fn enum_music_windows(hwnd: HWND, lparam: LPARAM) -> BOOL
         }
     }
 
-    // 2. YouTube Music (Tauri desktop app, Chrome/Edge PWA, or browser tab)
-    if title.contains("youtube music") || exe.contains("youtube music") || exe.contains("ytm") || exe.contains("tauri") {
+    // 2. YouTube Music (Tauri desktop app, NabyTune, Chrome/Edge PWA, or browser tab)
+    if title.contains("youtube music") || title.contains("nabytune") || exe.contains("youtube music") || exe.contains("ytm") || exe.contains("tauri") || exe.contains("nabytune") {
         ctx.found = Some(hwnd);
         return BOOL(0);
     }
@@ -1079,9 +1079,6 @@ unsafe extern "system" fn enum_find_tauri_window(hwnd: HWND, lparam: LPARAM) -> 
     }
     let is_vis = IsWindowVisible(hwnd).as_bool();
     let is_ico = IsIconic(hwnd).as_bool();
-    if !is_vis && !is_ico {
-        return BOOL(1);
-    }
 
     let mut pid = 0u32;
     GetWindowThreadProcessId(hwnd, Some(&mut pid));
@@ -1089,6 +1086,11 @@ unsafe extern "system" fn enum_find_tauri_window(hwnd: HWND, lparam: LPARAM) -> 
         return BOOL(1);
     }
     let exe = get_process_name(pid).to_lowercase();
+
+    // If hidden to tray, only consider known music player exes
+    if !is_vis && !is_ico && !exe.contains("naby") && !exe.contains("tauri") {
+        return BOOL(1);
+    }
 
     // Never match web browsers when hunting for dedicated Tauri / YTM desktop window
     let is_browser = exe.contains("chrome")
@@ -1113,7 +1115,9 @@ unsafe extern "system" fn enum_find_tauri_window(hwnd: HWND, lparam: LPARAM) -> 
     let is_match = exe.contains("tauri")
         || exe.contains("youtube music")
         || exe.contains("ytm")
-        || title.contains("youtube music");
+        || exe.contains("naby")
+        || title.contains("youtube music")
+        || title.contains("nabytune");
 
     if is_match {
         let mut rc = RECT::default();
@@ -1136,7 +1140,7 @@ pub fn activate_or_toggle_media_player(track: Option<&crate::island::TrackInfo>)
 
     let is_ytm = track.map(|t| {
         let s = t.source.to_lowercase();
-        s.contains("tauri") || s.contains("ytm") || s.contains("youtube music")
+        s.contains("tauri") || s.contains("ytm") || s.contains("youtube music") || s.contains("nabytune")
     }).unwrap_or(false);
 
     // 1. If Tauri YouTube Music (YTMPX) is connected:
