@@ -26,6 +26,20 @@ fn get_sta_worker() -> &'static Sender<StaTransliterateRequest> {
                         results.push(transliterate_japanese_impl(&text));
                     }
                     let _ = req.resp.send(results);
+
+                    // Strictly pump and dispatch pending Windows COM messages on this STA thread!
+                    // Without message pumping, COM marshaling release callbacks and RPC cleanup stubs
+                    // accumulate indefinitely in the STA thread's message queue, leaking native memory.
+                    unsafe {
+                        use windows::Win32::UI::WindowsAndMessaging::{
+                            DispatchMessageW, PeekMessageW, TranslateMessage, MSG, PM_REMOVE,
+                        };
+                        let mut msg = MSG::default();
+                        while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                            let _ = TranslateMessage(&msg);
+                            DispatchMessageW(&msg);
+                        }
+                    }
                 }
             })
             .expect("Failed to spawn STA thread");

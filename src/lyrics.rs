@@ -264,6 +264,19 @@ impl SongLyrics {
         let info = self.get_active_line_info(pos, use_romaji);
         (info.prev, info.curr, info.next)
     }
+
+    /// Lazily romanizes CJK text for active playback only when needed.
+    /// Defers expensive WinRT JapanesePhoneticAnalyzer COM calls so they are only invoked
+    /// for the chosen/displayed song, completely eliminating allocation spikes during candidate search!
+    pub fn ensure_romanized(&mut self) {
+        if self.has_cjk {
+            for line in &mut self.lines {
+                if line.romaji_text.is_none() && crate::transliterate::contains_cjk(&line.text) {
+                    line.romaji_text = Some(crate::transliterate::romanize_line(&line.text));
+                }
+            }
+        }
+    }
 }
 
 static LYRICS_CACHE: Mutex<Option<HashMap<String, SongLyrics>>> = Mutex::new(None);
@@ -342,17 +355,11 @@ pub fn parse_lrc(lrc_text: &str, title: &str, artist: &str) -> SongLyrics {
 
         let lyric_text = line[text_start..].trim();
         if !timestamps.is_empty() {
-            let romaji = if crate::transliterate::contains_cjk(lyric_text) {
-                Some(crate::transliterate::romanize_line(lyric_text))
-            } else {
-                None
-            };
-
             for t in timestamps {
                 lines.push(LyricLine {
                     time_secs: t,
                     text: lyric_text.to_string(),
-                    romaji_text: romaji.clone(),
+                    romaji_text: None,
                 });
             }
         }
@@ -360,7 +367,7 @@ pub fn parse_lrc(lrc_text: &str, title: &str, artist: &str) -> SongLyrics {
 
     lines.sort_by(|a, b| a.time_secs.partial_cmp(&b.time_secs).unwrap_or(std::cmp::Ordering::Equal));
 
-    let has_cjk = lines.iter().any(|l| l.romaji_text.is_some());
+    let has_cjk = lines.iter().any(|l| crate::transliterate::contains_cjk(&l.text));
 
     SongLyrics {
         title: title.to_string(),
@@ -469,42 +476,81 @@ fn fetch_netease_string(url: &str) -> Option<String> {
 }
 
 fn fetch_netease_candidates(
-    clean_title: &str,
-    clean_artist: &str,
+    q: &QueryParts,
     original_title: &str,
     original_artist: &str,
     target_duration: f32,
-) -> Vec<SongLyrics> {
-    let query = if clean_artist.is_empty() {
-        clean_title.to_string()
-    } else {
-        format!("{} {}", clean_title, clean_artist)
-    };
-    let enc_query = url_encode(query.trim());
+) -> Vec<(f32, SongLyrics)> {
+    let mut queries: Vec<String> = Vec::new();
+    if !q.artist.is_empty() {
+        queries.push(format!("{} {}", q.core_title, q.artist));
+    }
+    if let Some(ref alt_a) = q.alt_artist {
+        queries.push(format!("{} {}", q.core_title, alt_a));
+    }
+    if let Some(ref alt_t) = q.alt_title {
+        if !q.artist.is_empty() {
+            queries.push(format!("{} {}", alt_t, q.artist));
+        }
+    }
+    queries.push(q.core_title.clone());
+    queries.dedup();
 
-    let search_url = format!(
-        "https://music.163.com/api/search/get/?s={}&type=1&limit=4",
-        enc_query
-    );
+    let mut ranked: Vec<(f32, NeteaseSong)> = Vec::new();
+    let mut seen_ids = std::collections::HashSet::new();
+
+    for query in queries {
+        let enc_query = url_encode(query.trim());
+        let search_url = format!(
+            "https://music.163.com/api/search/get/?s={}&type=1&limit=8",
+            enc_query
+        );
+        let Some(json_resp) = fetch_netease_string(&search_url) else { continue };
+        let Ok(search_data) = serde_json::from_str::<NeteaseSearchResponse>(&json_resp) else { continue };
+        let Some(songs) = search_data.result.and_then(|r| r.songs) else { continue };
+
+        let mut strong_hit = false;
+        for song in songs {
+            if !seen_ids.insert(song.id) {
+                continue;
+            }
+            let s_title = song.name.as_deref().unwrap_or("");
+            let t_score = score_title_match(s_title, q);
+            if t_score <= 0.0 {
+                // Hard reject wrong song title (e.g. a different track by the same artist)
+                continue;
+            }
+            let artists_joined = song
+                .artists
+                .as_ref()
+                .map(|list| {
+                    list.iter()
+                        .filter_map(|a| a.name.as_deref())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
+            let a_score = score_artist_match(&artists_joined, q);
+            let dur_secs = song.duration.unwrap_or(0.0) / 1000.0;
+            let d_score = score_duration_match(dur_secs, target_duration);
+            if target_duration > 15.0 && dur_secs > 10.0 && (dur_secs - target_duration).abs() > 45.0 {
+                continue;
+            }
+            let total = t_score + a_score + d_score;
+            if total >= 140.0 {
+                strong_hit = true;
+            }
+            ranked.push((total, song));
+        }
+        if strong_hit {
+            break;
+        }
+    }
+
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     let mut candidates = Vec::new();
-
-    let json_resp = match fetch_netease_string(&search_url) {
-        Some(j) => j,
-        None => return candidates,
-    };
-
-    let search_data: NeteaseSearchResponse = match serde_json::from_str(&json_resp) {
-        Ok(d) => d,
-        Err(_) => return candidates,
-    };
-
-    let songs = match search_data.result.and_then(|r| r.songs) {
-        Some(s) => s,
-        None => return candidates,
-    };
-
-    for song in songs.into_iter().take(2) {
+    for (score, song) in ranked.into_iter().take(4) {
         let lyric_url = format!(
             "https://music.163.com/api/song/lyric?id={}&lv=1&kv=1&tv=-1",
             song.id
@@ -527,13 +573,16 @@ fn fetch_netease_candidates(
                             let mut parsed = parse_lrc(&raw_lrc, original_title, original_artist);
                             parsed.candidate_info =
                                 format!("{} [NetEase] ({}:{:02})", song_artist, mins, secs);
-                            if !parsed.lines.is_empty() {
-                                candidates.push(parsed);
-                                break; // Stop as soon as valid synced lyrics are found
+                            if is_real_timed_lyrics(&parsed.lines, target_duration) {
+                                // +10 provider tie-breaker for NetEase synced LRC
+                                candidates.push((score + 10.0, parsed));
+                                if candidates.len() >= 2 {
+                                    break;
+                                }
                             }
                         }
                     }
-                } else if lrc_resp.nolyric == Some(true) {
+                } else if lrc_resp.nolyric == Some(true) && candidates.is_empty() {
                     let inst = SongLyrics {
                         title: original_title.to_string(),
                         artist: original_artist.to_string(),
@@ -544,19 +593,10 @@ fn fetch_netease_candidates(
                         candidate_info: format!("{} [NetEase Instrumental]", song_artist),
                         candidates: Vec::new(),
                     };
-                    candidates.push(inst);
-                    break;
+                    candidates.push((score - 20.0, inst));
                 }
             }
         }
-    }
-
-    if target_duration > 10.0 && candidates.len() > 1 {
-        candidates.sort_by(|a, b| {
-            let a_has = !a.lines.is_empty();
-            let b_has = !b.lines.is_empty();
-            b_has.cmp(&a_has)
-        });
     }
 
     candidates
@@ -566,6 +606,8 @@ fn fetch_netease_candidates(
 struct KugouSongItem {
     #[serde(rename = "FileHash")]
     file_hash: Option<String>,
+    #[serde(rename = "SongName")]
+    song_name: Option<String>,
     #[serde(rename = "Duration")]
     duration: Option<u32>,
     #[serde(rename = "SingerName")]
@@ -625,21 +667,20 @@ fn base64_decode_string(input: &str) -> Option<String> {
 }
 
 fn fetch_kugou_candidates(
-    clean_title: &str,
-    clean_artist: &str,
+    q: &QueryParts,
     original_title: &str,
     original_artist: &str,
     target_duration: f32,
-) -> Vec<SongLyrics> {
-    let query = if clean_artist.is_empty() {
-        clean_title.to_string()
+) -> Vec<(f32, SongLyrics)> {
+    let query = if q.artist.is_empty() {
+        q.core_title.clone()
     } else {
-        format!("{} {}", clean_title, clean_artist)
+        format!("{} {}", q.core_title, q.artist)
     };
     let enc_query = url_encode(query.trim());
 
     let search_url = format!(
-        "https://songsearch.kugou.com/song_search_v2?keyword={}&page=1&pagesize=2&platform=WebFilter&format=json",
+        "https://songsearch.kugou.com/song_search_v2?keyword={}&page=1&pagesize=5&platform=WebFilter&format=json",
         enc_query
     );
 
@@ -660,13 +701,23 @@ fn fetch_kugou_candidates(
         None => return candidates,
     };
 
-    for item in lists.into_iter().take(2) {
+    for item in lists.into_iter().take(5) {
         let hash = match item.file_hash {
             Some(h) if !h.is_empty() => h,
             _ => continue,
         };
-        let dur_ms = item.duration.unwrap_or(target_duration as u32) * 1000;
+        let s_name = item.song_name.as_deref().unwrap_or("");
+        let t_score = score_title_match(s_name, q);
+        if t_score <= 0.0 {
+            continue;
+        }
+        let dur_s_f = item.duration.unwrap_or(target_duration as u32) as f32;
+        if target_duration > 15.0 && dur_s_f > 10.0 && (dur_s_f - target_duration).abs() > 35.0 {
+            continue;
+        }
+        let dur_ms = (dur_s_f as u32) * 1000;
         let singer = item.singer_name.unwrap_or_else(|| original_artist.to_string());
+        let score = t_score + score_artist_match(&singer, q) + score_duration_match(dur_s_f, target_duration) + 5.0;
 
         let krcs_url = format!(
             "http://krcs.kugou.com/search?ver=1&man=yes&client=mobi&duration={}&hash={}",
@@ -692,8 +743,8 @@ fn fetch_kugou_candidates(
                                                 let mins = dur_s / 60;
                                                 let secs = dur_s % 60;
                                                 parsed.candidate_info = format!("{} [KuGou] ({}:{:02})", singer, mins, secs);
-                                                if !parsed.lines.is_empty() {
-                                                    candidates.push(parsed);
+                                                if is_real_timed_lyrics(&parsed.lines, target_duration) {
+                                                    candidates.push((score, parsed));
                                                     break;
                                                 }
                                             }
@@ -765,21 +816,20 @@ fn decode_qq_lyric(raw: &str) -> String {
 }
 
 fn fetch_qq_candidates(
-    clean_title: &str,
-    clean_artist: &str,
+    q: &QueryParts,
     original_title: &str,
     original_artist: &str,
     target_duration: f32,
-) -> Vec<SongLyrics> {
-    let query = if clean_artist.is_empty() {
-        clean_title.to_string()
+) -> Vec<(f32, SongLyrics)> {
+    let query = if q.artist.is_empty() {
+        q.core_title.clone()
     } else {
-        format!("{} {}", clean_title, clean_artist)
+        format!("{} {}", q.core_title, q.artist)
     };
     let enc_query = url_encode(query.trim());
 
     let search_url = format!(
-        "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=3&w={}&format=json",
+        "https://c.y.qq.com/soso/fcgi-bin/client_search_cp?p=1&n=5&w={}&format=json",
         enc_query
     );
 
@@ -807,11 +857,16 @@ fn fetch_qq_candidates(
         None => return candidates,
     };
 
-    for item in song_list.into_iter().take(2) {
+    for item in song_list.into_iter().take(5) {
         let mid = match item.songmid {
             Some(m) if !m.is_empty() => m,
             _ => continue,
         };
+        let s_name = item.songname.as_deref().unwrap_or("");
+        let t_score = score_title_match(s_name, q);
+        if t_score <= 0.0 {
+            continue;
+        }
 
         let singer = item.singer.as_ref()
             .and_then(|s| s.first())
@@ -819,6 +874,10 @@ fn fetch_qq_candidates(
             .unwrap_or_else(|| original_artist.to_string());
 
         let dur_s = item.interval.unwrap_or(target_duration as u32);
+        if target_duration > 15.0 && dur_s > 10 && ((dur_s as f32) - target_duration).abs() > 35.0 {
+            continue;
+        }
+        let score = t_score + score_artist_match(&singer, q) + score_duration_match(dur_s as f32, target_duration) + 5.0;
 
         let lyric_url = format!(
             "https://c.y.qq.com/lyric/fcgi-bin/fcg_query_lyric_new.fcg?songmid={}&format=json",
@@ -841,8 +900,8 @@ fn fetch_qq_candidates(
                         let mins = dur_s / 60;
                         let secs = dur_s % 60;
                         parsed.candidate_info = format!("{} [QQ Music] ({}:{:02})", singer, mins, secs);
-                        if !parsed.lines.is_empty() {
-                            candidates.push(parsed);
+                        if is_real_timed_lyrics(&parsed.lines, target_duration) {
+                            candidates.push((score, parsed));
                             break;
                         }
                     }
@@ -919,15 +978,10 @@ pub fn parse_ttml(ttml_text: &str, title: &str, artist: &str) -> SongLyrics {
                     let text = clean_text.split_whitespace().collect::<Vec<_>>().join(" ");
 
                     if !text.is_empty() {
-                        let romaji = if crate::transliterate::contains_cjk(&text) {
-                            Some(crate::transliterate::romanize_line(&text))
-                        } else {
-                            None
-                        };
                         lines.push(LyricLine {
                             time_secs: secs,
                             text,
-                            romaji_text: romaji,
+                            romaji_text: None,
                         });
                     }
                 }
@@ -936,7 +990,7 @@ pub fn parse_ttml(ttml_text: &str, title: &str, artist: &str) -> SongLyrics {
     }
 
     lines.sort_by(|a, b| a.time_secs.partial_cmp(&b.time_secs).unwrap_or(std::cmp::Ordering::Equal));
-    let has_cjk = lines.iter().any(|l| l.romaji_text.is_some());
+    let has_cjk = lines.iter().any(|l| crate::transliterate::contains_cjk(&l.text));
 
     SongLyrics {
         title: title.to_string(),
@@ -951,41 +1005,66 @@ pub fn parse_ttml(ttml_text: &str, title: &str, artist: &str) -> SongLyrics {
 }
 
 fn fetch_bini_candidates(
-    clean_title: &str,
-    clean_artist: &str,
+    q: &QueryParts,
     original_title: &str,
     original_artist: &str,
     target_duration: f32,
-) -> Vec<SongLyrics> {
+) -> Vec<(f32, SongLyrics)> {
     let dur_int = target_duration.round() as i32;
-    let url = format!(
-        "https://lyrics-api.binimum.org/?track={}&artist={}&duration={}",
-        url_encode(clean_title),
-        url_encode(clean_artist),
-        dur_int
-    );
+    let mut attempts: Vec<(&str, &str)> = vec![(&q.core_title, &q.artist)];
+    if let Some(ref alt_a) = q.alt_artist {
+        attempts.push((&q.core_title, alt_a));
+    }
+
     let mut candidates = Vec::new();
-    let Some(json_resp) = fetch_url_string(&url) else { return candidates };
-    let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_resp) else { return candidates };
-    let Some(results) = val.get("results").and_then(|r| r.as_array()) else { return candidates };
+    for (track_q, artist_q) in attempts {
+        let url = format!(
+            "https://lyrics-api.binimum.org/?track={}&artist={}&duration={}",
+            url_encode(track_q),
+            url_encode(artist_q),
+            dur_int
+        );
+        let Some(json_resp) = fetch_url_string(&url) else { continue };
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(&json_resp) else { continue };
+        let Some(results) = val.get("results").and_then(|r| r.as_array()) else { continue };
 
-    for hit in results.iter().take(3) {
-        let Some(lyrics_url) = hit.get("lyricsUrl").and_then(|u| u.as_str()) else { continue };
-        let hit_artist = hit.get("artist").and_then(|a| a.as_str()).unwrap_or(original_artist);
-        let hit_dur = hit.get("duration").and_then(|d| d.as_f64()).unwrap_or(target_duration as f64) as f32;
-        let mins = (hit_dur / 60.0).floor() as u32;
-        let secs = (hit_dur % 60.0).round() as u32;
-
-        if let Some(raw_content) = fetch_url_string(lyrics_url) {
-            let mut parsed = if raw_content.contains("<p ") || raw_content.contains("<tt ") {
-                parse_ttml(&raw_content, original_title, original_artist)
+        for hit in results.iter().take(4) {
+            let Some(lyrics_url) = hit.get("lyricsUrl").and_then(|u| u.as_str()) else { continue };
+            let hit_title = hit
+                .get("title")
+                .or_else(|| hit.get("name"))
+                .or_else(|| hit.get("trackName"))
+                .and_then(|t| t.as_str())
+                .unwrap_or("");
+            let t_score = if !hit_title.is_empty() {
+                let s = score_title_match(hit_title, q);
+                if s <= 0.0 {
+                    continue;
+                }
+                s
             } else {
-                parse_lrc(&raw_content, original_title, original_artist)
+                60.0
             };
-            if !parsed.lines.is_empty() {
-                parsed.candidate_info = format!("{} [BiniLyrics] ({}:{:02})", hit_artist, mins, secs);
-                candidates.push(parsed);
-                break;
+            let hit_artist = hit.get("artist").and_then(|a| a.as_str()).unwrap_or(original_artist);
+            let hit_dur = hit.get("duration").and_then(|d| d.as_f64()).unwrap_or(target_duration as f64) as f32;
+            if target_duration > 15.0 && hit_dur > 10.0 && (hit_dur - target_duration).abs() > 35.0 {
+                continue;
+            }
+            let mins = (hit_dur / 60.0).floor() as u32;
+            let secs = (hit_dur % 60.0).round() as u32;
+            let score = t_score + score_artist_match(hit_artist, q) + score_duration_match(hit_dur, target_duration) + 12.0;
+
+            if let Some(raw_content) = fetch_url_string(lyrics_url) {
+                let mut parsed = if raw_content.contains("<p ") || raw_content.contains("<tt ") {
+                    parse_ttml(&raw_content, original_title, original_artist)
+                } else {
+                    parse_lrc(&raw_content, original_title, original_artist)
+                };
+                if is_real_timed_lyrics(&parsed.lines, target_duration) {
+                    parsed.candidate_info = format!("{} [BiniLyrics] ({}:{:02})", hit_artist, mins, secs);
+                    candidates.push((score, parsed));
+                    return candidates;
+                }
             }
         }
     }
@@ -993,169 +1072,371 @@ fn fetch_bini_candidates(
 }
 
 fn fetch_better_lyrics_candidates(
-    clean_title: &str,
-    clean_artist: &str,
+    q: &QueryParts,
     original_title: &str,
     original_artist: &str,
     target_duration: f32,
-) -> Vec<SongLyrics> {
+) -> Vec<(f32, SongLyrics)> {
     let dur_int = target_duration.round() as i32;
-    let url = format!(
-        "https://lyrics-api.boidu.dev/getLyrics?s={}&a={}&d={}",
-        url_encode(clean_title),
-        url_encode(clean_artist),
-        dur_int
-    );
+    let mut attempts: Vec<(&str, &str)> = vec![(&q.core_title, &q.artist)];
+    if let Some(ref alt_a) = q.alt_artist {
+        attempts.push((&q.core_title, alt_a));
+    }
+
     let mut candidates = Vec::new();
-    let Some(raw_resp) = fetch_url_string(&url) else { return candidates };
-    let mins = (target_duration / 60.0).floor() as u32;
-    let secs = (target_duration % 60.0).round() as u32;
+    for (track_q, artist_q) in attempts {
+        let url = format!(
+            "https://lyrics-api.boidu.dev/getLyrics?s={}&a={}&d={}",
+            url_encode(track_q),
+            url_encode(artist_q),
+            dur_int
+        );
+        let Some(raw_resp) = fetch_url_string(&url) else { continue };
+        let mins = (target_duration / 60.0).floor() as u32;
+        let secs = (target_duration % 60.0).round() as u32;
 
-    let content = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_resp) {
-        if let Some(ttml) = val.get("ttml").and_then(|t| t.as_str()) {
-            Some(ttml.to_string())
-        } else if let Some(synced) = val.get("syncedLyrics").and_then(|s| s.as_str()) {
-            Some(synced.to_string())
-        } else if let Some(lrc) = val.get("lyrics").and_then(|l| l.as_str()) {
-            Some(lrc.to_string())
-        } else {
-            None
-        }
-    } else {
-        Some(raw_resp)
-    };
+        let mut hit_title = String::new();
+        let mut hit_artist = artist_q.to_string();
+        let mut hit_dur = target_duration;
 
-    if let Some(text) = content {
-        let mut parsed = if text.contains("<p ") || text.contains("<tt ") {
-            parse_ttml(&text, original_title, original_artist)
+        let content = if let Ok(val) = serde_json::from_str::<serde_json::Value>(&raw_resp) {
+            if let Some(t) = val.get("title").or_else(|| val.get("trackName")).or_else(|| val.get("name")).and_then(|v| v.as_str()) {
+                hit_title = t.to_string();
+            }
+            if let Some(a) = val.get("artist").or_else(|| val.get("artistName")).and_then(|v| v.as_str()) {
+                hit_artist = a.to_string();
+            }
+            if let Some(d) = val.get("duration").and_then(|v| v.as_f64()) {
+                hit_dur = d as f32;
+            }
+            if let Some(ttml) = val.get("ttml").and_then(|t| t.as_str()) {
+                Some(ttml.to_string())
+            } else if let Some(synced) = val.get("syncedLyrics").and_then(|s| s.as_str()) {
+                Some(synced.to_string())
+            } else if let Some(lrc) = val.get("lyrics").and_then(|l| l.as_str()) {
+                Some(lrc.to_string())
+            } else {
+                None
+            }
         } else {
-            parse_lrc(&text, original_title, original_artist)
+            Some(raw_resp)
         };
-        if !parsed.lines.is_empty() {
-            parsed.candidate_info = format!("{} [BetterLyrics] ({}:{:02})", original_artist, mins, secs);
-            candidates.push(parsed);
+
+        if !hit_title.is_empty() && score_title_match(&hit_title, q) <= 0.0 {
+            continue;
+        }
+        if target_duration > 15.0 && hit_dur > 10.0 && (hit_dur - target_duration).abs() > 35.0 {
+            continue;
+        }
+
+        if let Some(text) = content {
+            let mut parsed = if text.contains("<p ") || text.contains("<tt ") {
+                parse_ttml(&text, original_title, original_artist)
+            } else {
+                parse_lrc(&text, original_title, original_artist)
+            };
+            if is_real_timed_lyrics(&parsed.lines, target_duration) {
+                let t_score = if hit_title.is_empty() { 70.0 } else { score_title_match(&hit_title, q) };
+                let score = t_score + score_artist_match(&hit_artist, q) + score_duration_match(hit_dur, target_duration) + 12.0;
+                parsed.candidate_info = format!("{} [BetterLyrics] ({}:{:02})", hit_artist, mins, secs);
+                candidates.push((score, parsed));
+                return candidates;
+            }
         }
     }
     candidates
 }
 
+#[derive(Debug, Clone)]
+struct QueryParts {
+    /// Core song title stripped of brackets, "(cover)", " / Original Artist", etc.
+    core_title: String,
+    /// Full cleaned title (brackets removed, before splitting " / " or " - ").
+    clean_title: String,
+    /// Optional alternate/translated title (e.g. "Four o'clock" in "四時にはね。 - Four o'clock").
+    alt_title: Option<String>,
+    /// Cleaned primary/performing artist.
+    artist: String,
+    /// Optional original artist parsed from cover titles like "ソラニン / ASIAN KUNG-FU GENERATION (cover)".
+    alt_artist: Option<String>,
+}
+
+fn strip_all_brackets(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut depth = 0i32;
+    for c in s.chars() {
+        match c {
+            '(' | '[' | '{' | '（' | '【' | '『' | '「' | '〔' | '〈' | '《' => depth += 1,
+            ')' | ']' | '}' | '）' | '】' | '』' | '」' | '〕' | '〉' | '》' => depth = (depth - 1).max(0),
+            _ if depth == 0 => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn strip_noise_suffix(s: &str) -> String {
+    let mut out = s
+        .replace('’', "'")
+        .replace('‘', "'")
+        .replace('“', "\"")
+        .replace('”', "\"");
+    let noise_words = [
+        "feat.", "ft.", "official", "music video", "lyric video", "video", "audio",
+        "mv", "remaster", "lyrics", "lyric", "soundtrack", "ost", "ver.", "cover", "covered by",
+    ];
+    for w in noise_words {
+        let lower = out.to_lowercase();
+        if let Some(pos) = lower.find(w) {
+            if !out.is_char_boundary(pos) {
+                continue;
+            }
+            if let Some(open) = out[..pos].rfind(|c| c == '(' || c == '[' || c == '（' || c == '【' || c == '-') {
+                out.truncate(open);
+            } else if pos > 2 {
+                // Standalone trailing word like "... cover"
+                let prev = out[..pos].chars().last().unwrap_or(' ');
+                if prev.is_whitespace() || prev == '/' || prev == '|' {
+                    out.truncate(pos);
+                }
+            }
+        }
+    }
+    out.trim_matches(|c: char| c.is_whitespace() || c == '.' || c == '…' || c == '-' || c == '—' || c == '/')
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn extract_query_parts(raw_title: &str, raw_artist: &str) -> QueryParts {
+    let bracketless_t = strip_all_brackets(raw_title);
+    let first_pipe = bracketless_t.split(" | ").next().unwrap_or(&bracketless_t);
+    let clean_t = strip_noise_suffix(first_pipe);
+    let clean_t = if clean_t.is_empty() {
+        strip_noise_suffix(raw_title)
+    } else {
+        clean_t
+    };
+
+    let clean_a = strip_noise_suffix(&strip_all_brackets(raw_artist));
+    let clean_a = clean_a
+        .strip_suffix(" - Topic")
+        .or_else(|| clean_a.strip_suffix(" - topic"))
+        .unwrap_or(&clean_a)
+        .trim()
+        .to_string();
+
+    let mut core_title = clean_t.clone();
+    let mut alt_title = None;
+    let mut alt_artist = None;
+
+    // Handle cover/Japanese YouTube format: "ソラニン / ASIAN KUNG-FU GENERATION (cover)"
+    if let Some((left, right)) = clean_t.split_once(" / ").or_else(|| clean_t.split_once("／")) {
+        let l = left.trim();
+        let r = strip_noise_suffix(right);
+        if !l.is_empty() {
+            core_title = l.to_string();
+        }
+        if !r.is_empty() && norm_cmp(&r) != norm_cmp(&clean_a) {
+            alt_artist = Some(r);
+        }
+    } else if let Some((left, right)) = clean_t.split_once(" - ").or_else(|| clean_t.split_once(" — ")) {
+        // Handle bilingual titles like "好きでいて - Suki de Ite" or "四時にはね。 - Four o'clock"
+        let l = left.trim();
+        let r = strip_noise_suffix(right);
+        if !l.is_empty() {
+            core_title = l.to_string();
+        }
+        if !r.is_empty() {
+            alt_title = Some(r);
+        }
+    }
+
+    QueryParts {
+        core_title,
+        clean_title: clean_t,
+        alt_title,
+        artist: clean_a,
+        alt_artist,
+    }
+}
+
+/// Normalizes a title/artist string for accurate fuzzy comparison across CJK & Latin scripts.
+fn norm_cmp(s: &str) -> String {
+    strip_all_brackets(s)
+        .to_lowercase()
+        .chars()
+        .filter(|c| c.is_alphanumeric())
+        .collect()
+}
+
+/// Validates whether a candidate song title actually refers to the playing song.
+/// Returns > 0.0 on a real match, or -100.0 to hard-reject unrelated tracks.
+fn score_title_match(cand_title: &str, q: &QueryParts) -> f32 {
+    let c_norm = norm_cmp(cand_title);
+    if c_norm.is_empty() {
+        return -100.0;
+    }
+
+    let mut best = -100.0f32;
+    let mut targets: Vec<&str> = vec![&q.core_title, &q.clean_title];
+    if let Some(ref at) = q.alt_title {
+        targets.push(at.as_str());
+    }
+
+    for target in targets {
+        let t_norm = norm_cmp(target);
+        if t_norm.is_empty() {
+            continue;
+        }
+        if c_norm == t_norm {
+            return 110.0;
+        }
+        let min_chars = if crate::transliterate::contains_cjk(&t_norm) { 2 } else { 3 };
+        let c_chars = c_norm.chars().count();
+        let t_chars = t_norm.chars().count();
+        if (t_chars >= min_chars && c_norm.contains(&t_norm))
+            || (c_chars >= min_chars && t_norm.contains(&c_norm))
+        {
+            let ratio = (c_chars.min(t_chars) as f32) / (c_chars.max(t_chars).max(1) as f32);
+            best = best.max(65.0 + ratio * 30.0);
+            continue;
+        }
+
+        // Word-level overlap for multi-word Latin titles
+        let t_low = target.to_lowercase();
+        let c_low = strip_all_brackets(cand_title).to_lowercase();
+        let t_words: Vec<&str> = t_low.split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 2).collect();
+        let c_words: Vec<&str> = c_low.split(|c: char| !c.is_alphanumeric()).filter(|w| w.len() >= 2).collect();
+        if !t_words.is_empty() && !c_words.is_empty() {
+            let hits = t_words.iter().filter(|w| c_words.contains(w)).count();
+            let ratio = hits as f32 / t_words.len() as f32;
+            if ratio >= 0.5 {
+                best = best.max(35.0 + ratio * 35.0);
+            }
+        }
+    }
+
+    best
+}
+
+fn score_artist_match(cand_artist: &str, q: &QueryParts) -> f32 {
+    let c_norm = norm_cmp(cand_artist);
+    if c_norm.is_empty() {
+        return 0.0;
+    }
+
+    let check = |target: &str, exact_bonus: f32, sub_bonus: f32| -> Option<f32> {
+        let t_norm = norm_cmp(target);
+        if t_norm.is_empty() {
+            return None;
+        }
+        if c_norm == t_norm {
+            return Some(exact_bonus);
+        }
+        if c_norm.contains(&t_norm) || t_norm.contains(&c_norm) {
+            return Some(sub_bonus);
+        }
+        let c_low = cand_artist.to_lowercase();
+        for part in target.to_lowercase().split(&[' ', ',', '/', '&', '・', '、'][..]) {
+            if part.chars().count() >= 3 && c_low.contains(part) {
+                return Some(sub_bonus * 0.75);
+            }
+        }
+        None
+    };
+
+    // Matching the performing artist (e.g. Harutya) gets top priority
+    if let Some(s) = check(&q.artist, 85.0, 65.0) {
+        return s;
+    }
+    // For cover songs ("ソラニン / ASIAN KUNG-FU GENERATION"), matching the original artist is still great!
+    if let Some(ref alt_a) = q.alt_artist {
+        if let Some(s) = check(alt_a, 65.0, 50.0) {
+            return s;
+        }
+    }
+    if q.artist.is_empty() { 0.0 } else { -30.0 }
+}
+
+fn score_duration_match(cand_dur: f32, target_duration: f32) -> f32 {
+    if target_duration <= 10.0 || cand_dur <= 10.0 {
+        return 0.0;
+    }
+    let diff = (cand_dur - target_duration).abs();
+    if diff <= 3.0 {
+        60.0
+    } else if diff <= 8.0 {
+        38.0
+    } else if diff <= 15.0 {
+        15.0
+    } else if diff <= 25.0 {
+        0.0
+    } else {
+        -(diff - 25.0).min(55.0)
+    }
+}
+
+/// Verifies that parsed lyric lines actually have real progressing timestamps (rejects fake 0:00 or 1s counters).
+fn is_real_timed_lyrics(lines: &[LyricLine], target_duration: f32) -> bool {
+    let sung: Vec<f32> = lines
+        .iter()
+        .filter(|l| !l.text.trim().is_empty())
+        .map(|l| l.time_secs)
+        .collect();
+    if sung.len() < 2 {
+        return false;
+    }
+    let mut distinct = sung.clone();
+    distinct.dedup_by(|a, b| (*a - *b).abs() < 0.02);
+    if distinct.len() * 2 < sung.len() {
+        return false;
+    }
+    let last = *distinct.last().unwrap_or(&0.0);
+    if last <= 1.0 {
+        return false;
+    }
+    let span = last - distinct[0];
+    if target_duration >= 60.0 && sung.len() >= 8 && span < target_duration * 0.25 {
+        return false;
+    }
+    true
+}
+
 fn score_candidate(
     cand: &LrclibResponse,
-    target_title: &str,
-    target_artist: &str,
+    q: &QueryParts,
     target_duration: f32,
 ) -> f32 {
-    let mut score = 0.0f32;
+    let c_title = cand.track_name.as_deref().unwrap_or("");
+    let c_artist = cand.artist_name.as_deref().unwrap_or("");
 
-    let c_title = cand.track_name.as_deref().unwrap_or("").trim().to_lowercase();
-    let c_artist = cand.artist_name.as_deref().unwrap_or("").trim().to_lowercase();
-    let t_title = target_title.trim().to_lowercase();
-    let t_artist = target_artist.trim().to_lowercase();
-
-    // 1. Title match
-    if !t_title.is_empty() && !c_title.is_empty() {
-        if c_title == t_title {
-            score += 100.0;
-        } else if c_title.contains(&t_title) || t_title.contains(&c_title) {
-            score += 65.0;
-        } else {
-            let t_words: Vec<&str> = t_title.split_whitespace().collect();
-            let c_words: Vec<&str> = c_title.split_whitespace().collect();
-            let mut matches = 0;
-            for w in &t_words {
-                if c_words.contains(w) {
-                    matches += 1;
-                }
-            }
-            if matches > 0 {
-                score += (matches as f32 / t_words.len().max(1) as f32) * 45.0;
-            } else {
-                score -= 35.0;
-            }
-        }
+    let t_score = score_title_match(c_title, q);
+    if t_score <= 0.0 {
+        return -100.0;
     }
 
-    // 2. Artist match
-    if !t_artist.is_empty() && !c_artist.is_empty() {
-        if c_artist == t_artist {
-            score += 90.0;
-        } else if c_artist.contains(&t_artist) || t_artist.contains(&c_artist) {
-            score += 70.0;
-        } else {
-            // Check word / separator matches (e.g. "Lotus Juice" in "Lotus Juice, Azumi Takahashi")
-            let t_parts: Vec<&str> = t_artist.split(&[' ', ',', '/', '&', '・'][..]).filter(|s| !s.is_empty()).collect();
-            let mut matched_part = false;
-            for p in &t_parts {
-                if p.len() >= 3 && c_artist.contains(p) {
-                    matched_part = true;
-                    break;
-                }
-            }
-            if matched_part {
-                score += 55.0;
-            } else {
-                // Known artist with 0 overlap: significant penalty
-                score -= 60.0;
-            }
-        }
-    }
+    let mut score = t_score;
+    score += score_artist_match(c_artist, q);
+    score += score_duration_match(cand.duration.unwrap_or(0.0), target_duration);
 
-    // 3. Duration match
-    if target_duration > 10.0 {
-        if let Some(c_dur) = cand.duration {
-            if c_dur > 10.0 {
-                let diff = (c_dur - target_duration).abs();
-                if diff <= 3.0 {
-                    score += 60.0;
-                } else if diff <= 8.0 {
-                    score += 35.0;
-                } else if diff <= 15.0 {
-                    score += 10.0;
-                } else if diff > 30.0 {
-                    score -= (diff - 30.0).min(50.0);
-                }
-            }
-        }
-    }
-
-    // 4. Has synced lyrics bonus
     if cand.synced_lyrics.is_some() {
         score += 40.0;
     }
 
-    // 5. CJK language match bonus / mismatch penalty
-    let target_has_cjk = crate::transliterate::contains_cjk(target_title) || crate::transliterate::contains_cjk(target_artist);
+    let target_has_cjk = crate::transliterate::contains_cjk(&q.core_title)
+        || crate::transliterate::contains_cjk(&q.artist);
     let lyrics_text = cand.synced_lyrics.as_deref().or(cand.plain_lyrics.as_deref()).unwrap_or("");
     let lyrics_has_cjk = crate::transliterate::contains_cjk(lyrics_text);
 
     if target_has_cjk && lyrics_has_cjk {
-        score += 35.0;
-    } else if target_has_cjk && !lyrics_has_cjk && !lyrics_text.is_empty() {
-        // Japanese/CJK song receiving Latin-only lyrics without strong artist match: heavy penalty
-        if score < 130.0 {
-            score -= 55.0;
-        }
+        score += 25.0;
+    } else if target_has_cjk && !lyrics_has_cjk && !lyrics_text.is_empty() && score < 140.0 {
+        score -= 45.0;
     }
 
-    score
-}
-
-/// Cleans track title from redundant noise like "(feat. ...)", "[Official Video]", "- Remastered", etc.
-fn clean_query_str(s: &str) -> String {
-    let mut out = s.replace('’', "'").replace('‘', "'").replace('“', "\"").replace('”', "\"");
-
-    // Remove text inside parentheses / brackets if it contains typical noise words
-    let noise_words = ["feat.", "ft.", "official", "video", "audio", "mv", "remaster", "lyrics", "lyric", "soundtrack", "ost", "theme", "ver."];
-    for w in noise_words {
-        let lower = out.to_lowercase();
-        if let Some(pos) = lower.find(w) {
-            if let Some(open) = out[..pos].rfind(|c| c == '(' || c == '[' || c == '-') {
-                out.truncate(open);
-            }
-        }
-    }
-
-    out.trim().to_string()
+    // +8 provider tie-breaker for LRCLIB
+    score + 8.0
 }
 
 fn url_encode(input: &str) -> String {
@@ -1252,15 +1533,23 @@ pub fn fetch_lyrics_async(
             let _ = SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         }
 
-        // Step A: Check disk cache off the UI thread
+        // Step A: Check disk cache off the UI thread (supports both LRC and cached TTML)
         if let Some(dir) = get_lyrics_dir() {
             let safe_filename: String = key.chars().map(|c| if c.is_alphanumeric() { c } else { '_' }).collect();
             let file_path = dir.join(format!("{}.lrc", safe_filename));
             if let Ok(content) = fs::read_to_string(&file_path) {
-                let parsed = parse_lrc(&content, &title, &artist);
+                let mut parsed = if content.contains("<p ") || content.contains("<tt ") {
+                    parse_ttml(&content, &title, &artist)
+                } else {
+                    parse_lrc(&content, &title, &artist)
+                };
                 if !parsed.lines.is_empty() || parsed.is_instrumental {
+                    parsed.ensure_romanized();
                     if let Ok(mut guard) = LYRICS_CACHE.lock() {
                         let map = guard.get_or_insert_with(HashMap::new);
+                        if map.len() > 60 {
+                            map.clear();
+                        }
                         map.insert(key, parsed.clone());
                     }
                     let _ = sender.send(MediaEvent::LyricsLoaded(parsed));
@@ -1269,19 +1558,18 @@ pub fn fetch_lyrics_async(
             }
         }
 
-        // Step B: Online fetch with smart early-exit (avoids spawning redundant curl processes)
-        let clean_title = clean_query_str(&title);
-        let clean_artist = clean_query_str(&artist);
+        // Step B: Smart query extraction (handles covers like "ソラニン / ASIAN KUNG-FU GENERATION (cover)")
+        let q = extract_query_parts(&title, &artist);
 
-        let enc_title = url_encode(&clean_title);
-        let enc_artist = url_encode(&clean_artist);
+        let enc_title = url_encode(&q.core_title);
+        let enc_artist = url_encode(&q.artist);
         let dur_int = duration_secs.round() as i32;
 
         let mut collected_candidates: Vec<LrclibResponse> = Vec::new();
         let mut have_synced = false;
 
-        // Strategy 1: Exact lookup with duration (Fastest & most accurate: exactly 1 curl call)
-        if dur_int > 0 && !clean_artist.is_empty() {
+        // Strategy 1: Exact lookup with duration
+        if dur_int > 0 && !q.artist.is_empty() {
             let get_url = format!(
                 "https://lrclib.net/api/get?artist_name={}&track_name={}&duration={}",
                 enc_artist, enc_title, dur_int
@@ -1293,8 +1581,8 @@ pub fn fetch_lyrics_async(
             }
         }
 
-        // Strategy 2: Lookup without duration (Only if Strategy 1 did not return synced lyrics)
-        if !have_synced && !clean_artist.is_empty() {
+        // Strategy 2: Lookup without duration
+        if !have_synced && !q.artist.is_empty() {
             let get_url = format!(
                 "https://lrclib.net/api/get?artist_name={}&track_name={}",
                 enc_artist, enc_title
@@ -1306,8 +1594,8 @@ pub fn fetch_lyrics_async(
             }
         }
 
-        // Strategy 3: Search endpoint by track & artist fields (Only if still no synced lyrics)
-        if !have_synced && !clean_artist.is_empty() {
+        // Strategy 3: Search by core title + artist
+        if !have_synced && !q.artist.is_empty() {
             let search_url = format!(
                 "https://lrclib.net/api/search?track_name={}&artist_name={}",
                 enc_title, enc_artist
@@ -1319,9 +1607,25 @@ pub fn fetch_lyrics_async(
             }
         }
 
-        // Strategy 4: Fallback search query `q=title artist` (Only if still nothing found)
+        // Strategy 3b: Cover fallback — search by core title + original artist (e.g. "ソラニン" + "ASIAN KUNG-FU GENERATION")
+        if !have_synced {
+            if let Some(ref alt_a) = q.alt_artist {
+                let search_url = format!(
+                    "https://lrclib.net/api/search?track_name={}&artist_name={}",
+                    enc_title,
+                    url_encode(alt_a)
+                );
+                if let Some(json) = fetch_url_string(&search_url) {
+                    if add_lrclib_items(&json, &mut collected_candidates) {
+                        have_synced = true;
+                    }
+                }
+            }
+        }
+
+        // Strategy 4: Fallback search query `q=core_title artist`
         if !have_synced && collected_candidates.is_empty() {
-            let search_query = format!("{} {}", clean_title, clean_artist);
+            let search_query = format!("{} {}", q.core_title, q.artist);
             let search_url = format!("https://lrclib.net/api/search?q={}", url_encode(search_query.trim()));
             if let Some(json) = fetch_url_string(&search_url) {
                 if add_lrclib_items(&json, &mut collected_candidates) {
@@ -1330,25 +1634,15 @@ pub fn fetch_lyrics_async(
             }
         }
 
-        // Strategy 5: Search endpoint by track_name alone (Only if still nothing found)
+        // Strategy 5: Search endpoint by core track_name alone
         if !have_synced && collected_candidates.is_empty() {
             let search_url = format!("https://lrclib.net/api/search?track_name={}", enc_title);
-            if let Some(json) = fetch_url_string(&search_url) {
-                if add_lrclib_items(&json, &mut collected_candidates) {
-                    have_synced = true;
-                }
-            }
-        }
-
-        // Strategy 6: Search query with title alone (Only if still nothing found)
-        if !have_synced && collected_candidates.is_empty() {
-            let search_url = format!("https://lrclib.net/api/search?q={}", enc_title);
             if let Some(json) = fetch_url_string(&search_url) {
                 add_lrclib_items(&json, &mut collected_candidates);
             }
         }
 
-        // Deduplicate collected candidates
+        // Deduplicate collected LRCLIB candidates
         let mut deduped: Vec<LrclibResponse> = Vec::new();
         for item in collected_candidates {
             let is_dup = deduped.iter().any(|d| {
@@ -1362,37 +1656,30 @@ pub fn fetch_lyrics_async(
             }
         }
 
-        // Score candidates against query track & artist & duration
-        let mut scored: Vec<(f32, LrclibResponse)> = deduped
+        // Score LRCLIB candidates (strictly rejects unrelated titles)
+        let mut scored_lrclib: Vec<(f32, LrclibResponse)> = deduped
             .into_iter()
             .map(|c| {
-                let s = score_candidate(&c, &clean_title, &clean_artist, duration_secs);
+                let s = score_candidate(&c, &q, duration_secs);
                 (s, c)
             })
+            .filter(|(s, _)| *s >= 35.0)
             .collect();
+        scored_lrclib.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
-        // Sort descending by score
-        scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-
-        // Filter candidates with positive threshold
-        let valid_candidates: Vec<LrclibResponse> = scored
-            .into_iter()
-            .filter(|(s, _)| *s >= 15.0)
-            .map(|(_, c)| c)
-            .take(5)
-            .collect();
-
-        let mut parsed_candidates: Vec<SongLyrics> = Vec::new();
-        for cand in &valid_candidates {
+        let mut all_scored: Vec<(f32, SongLyrics)> = Vec::new();
+        for (score, cand) in scored_lrclib.into_iter().take(4) {
             let raw = cand.synced_lyrics.as_ref().or(cand.plain_lyrics.as_ref());
             if let Some(raw_text) = raw {
                 let mut p = parse_lrc(raw_text, &title, &artist);
                 p.is_instrumental = cand.instrumental.unwrap_or(false);
-                let dur = cand.duration.unwrap_or(0.0);
-                let mins = (dur / 60.0).floor() as u32;
-                let secs = (dur % 60.0).round() as u32;
-                p.candidate_info = format!("{} ({}:{:02})", cand.artist_name.as_deref().unwrap_or("?"), mins, secs);
-                parsed_candidates.push(p);
+                if p.is_instrumental || is_real_timed_lyrics(&p.lines, duration_secs) {
+                    let dur = cand.duration.unwrap_or(0.0);
+                    let mins = (dur / 60.0).floor() as u32;
+                    let secs = (dur % 60.0).round() as u32;
+                    p.candidate_info = format!("{} [LRCLIB] ({}:{:02})", cand.artist_name.as_deref().unwrap_or("?"), mins, secs);
+                    all_scored.push((score, p));
+                }
             } else if cand.instrumental == Some(true) {
                 let p = SongLyrics {
                     title: title.clone(),
@@ -1401,67 +1688,29 @@ pub fn fetch_lyrics_async(
                     is_instrumental: true,
                     has_cjk: false,
                     raw_lrc: String::new(),
-                    candidate_info: format!("{} (Instrumental)", cand.artist_name.as_deref().unwrap_or("?")),
+                    candidate_info: format!("{} [LRCLIB] (Instrumental)", cand.artist_name.as_deref().unwrap_or("?")),
                     candidates: Vec::new(),
                 };
-                parsed_candidates.push(p);
+                all_scored.push((score - 20.0, p));
             }
         }
 
-        // Query BiniLyrics & BetterLyrics (TTML word-synced) and NetEase:
-        let bini_cands = fetch_bini_candidates(
-            &clean_title,
-            &clean_artist,
-            &title,
-            &artist,
-            duration_secs,
-        );
+        // Query validated BiniLyrics, BetterLyrics, and NetEase (all return scored, title-verified hits)
+        all_scored.extend(fetch_bini_candidates(&q, &title, &artist, duration_secs));
+        all_scored.extend(fetch_better_lyrics_candidates(&q, &title, &artist, duration_secs));
+        all_scored.extend(fetch_netease_candidates(&q, &title, &artist, duration_secs));
 
-        let better_cands = fetch_better_lyrics_candidates(
-            &clean_title,
-            &clean_artist,
-            &title,
-            &artist,
-            duration_secs,
-        );
-
-        let netease_cands = fetch_netease_candidates(
-            &clean_title,
-            &clean_artist,
-            &title,
-            &artist,
-            duration_secs,
-        );
-
-        let mut all_candidates: Vec<SongLyrics> = Vec::new();
-        all_candidates.extend(bini_cands);
-        all_candidates.extend(better_cands);
-        all_candidates.extend(netease_cands);
-        all_candidates.extend(parsed_candidates);
-
-        // Fallback: If still no synced lyrics found from any above, query QQ Music and KuGou
-        let has_synced_so_far = all_candidates.iter().any(|c| !c.lines.is_empty());
+        // Fallback: If still no synced lyrics found from any above, query validated QQ Music and KuGou
+        let has_synced_so_far = all_scored.iter().any(|(_, c)| !c.lines.is_empty());
         if !has_synced_so_far {
-            let qq_cands = fetch_qq_candidates(
-                &clean_title,
-                &clean_artist,
-                &title,
-                &artist,
-                duration_secs,
-            );
-            all_candidates.extend(qq_cands);
-
-            let kugou_cands = fetch_kugou_candidates(
-                &clean_title,
-                &clean_artist,
-                &title,
-                &artist,
-                duration_secs,
-            );
-            all_candidates.extend(kugou_cands);
+            all_scored.extend(fetch_qq_candidates(&q, &title, &artist, duration_secs));
+            all_scored.extend(fetch_kugou_candidates(&q, &title, &artist, duration_secs));
         }
 
-        let parsed_candidates = all_candidates;
+        // Unified ranking: best title + artist + duration match across ALL providers wins #1!
+        all_scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        all_scored.truncate(5);
+        let parsed_candidates: Vec<SongLyrics> = all_scored.into_iter().map(|(_, c)| c).collect();
 
         let final_lyrics = if let Some(first) = parsed_candidates.first() {
             let mut top = first.clone();
@@ -1471,6 +1720,7 @@ pub fn fetch_lyrics_async(
                 let file_path = dir.join(format!("{}.lrc", safe_filename));
                 let _ = fs::write(file_path, &top.raw_lrc);
             }
+            top.ensure_romanized();
             top.candidates = parsed_candidates;
             top
         } else {

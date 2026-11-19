@@ -55,12 +55,9 @@ pub fn seek_playback(seconds: f32) {
     }
 
     thread::spawn(move || {
-        let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-            Ok(op) => match wait_async(op) {
-                Ok(m) => m,
-                Err(_) => return,
-            },
-            Err(_) => return,
+        let manager = match get_media_manager() {
+            Some(m) => m,
+            None => return,
         };
 
         if let Some(session) = get_best_media_session(&manager) {
@@ -72,18 +69,47 @@ pub fn seek_playback(seconds: f32) {
     });
 }
 
+static MEDIA_MANAGER: std::sync::Mutex<Option<GlobalSystemMediaTransportControlsSessionManager>> = std::sync::Mutex::new(None);
+
+/// Returns a cached singleton instance of GlobalSystemMediaTransportControlsSessionManager.
+/// Caching the manager is critical: calling RequestAsync() repeatedly in a timer or loop
+/// creates a cross-process native Windows Media broker connection leak!
+pub fn get_media_manager() -> Option<GlobalSystemMediaTransportControlsSessionManager> {
+    if let Ok(guard) = MEDIA_MANAGER.lock() {
+        if let Some(ref m) = *guard {
+            return Some(m.clone());
+        }
+    }
+    let op = GlobalSystemMediaTransportControlsSessionManager::RequestAsync().ok()?;
+    let manager = wait_async(op).ok()?;
+    if let Ok(mut guard) = MEDIA_MANAGER.lock() {
+        *guard = Some(manager.clone());
+    }
+    Some(manager)
+}
+
+pub fn reset_media_manager() {
+    if let Ok(mut guard) = MEDIA_MANAGER.lock() {
+        *guard = None;
+    }
+}
+
 fn wait_async<T: RuntimeType + 'static>(
     op: windows_future::IAsyncOperation<T>,
 ) -> Result<T> {
     let info: windows_future::IAsyncInfo = op.cast()?;
     while info.Status()? == windows_future::AsyncStatus::Started {
-        thread::sleep(Duration::from_millis(20));
+        thread::sleep(Duration::from_millis(15));
     }
-    op.GetResults()
+    let res = op.GetResults();
+    // Explicitly close IAsyncInfo to free native WinRT broker state immediately
+    let _ = info.Close();
+    res
 }
 
 /// Helper to select the most relevant media session.
-/// Prioritizes dedicated music apps (Tauri YTM, Spotify, YouTube Music) with album titles over generic video playback.
+/// Prioritizes dedicated music apps (Tauri YTM, Spotify, YouTube Music) over generic video playback.
+/// Uses synchronous COM getters (SourceAppUserModelId, GetPlaybackInfo) to eliminate async broker allocations!
 fn get_best_media_session(
     manager: &GlobalSystemMediaTransportControlsSessionManager,
 ) -> Option<GlobalSystemMediaTransportControlsSession> {
@@ -121,24 +147,6 @@ fn get_best_media_session(
                 score += 500;
             }
 
-            if let Ok(prop_op) = s.TryGetMediaPropertiesAsync() {
-                if let Ok(props) = wait_async(prop_op) {
-                    let title = props.Title().map(|h| h.to_string().to_lowercase()).unwrap_or_default();
-                    let album = props.AlbumTitle().map(|h| h.to_string()).unwrap_or_default();
-                    let artist = props.Artist().map(|h| h.to_string()).unwrap_or_default();
-                    if !album.is_empty() {
-                        score += 80; // Music tracks have album titles
-                    }
-                    if !artist.is_empty() {
-                        score += 30;
-                    }
-                    // Mild penalty for generic video playback only if dedicated music tracks exist
-                    if title.contains(" - youtube") || title.contains("youtube.com") {
-                        score = score.saturating_sub(15).max(5);
-                    }
-                }
-            }
-
             if best.as_ref().map(|(prev_score, _)| score > *prev_score).unwrap_or(true) {
                 best = Some((score, s));
             }
@@ -147,6 +155,8 @@ fn get_best_media_session(
         if let Some((_, s)) = best {
             return Some(s);
         }
+    } else {
+        reset_media_manager();
     }
 
     manager.GetCurrentSession().ok()
@@ -161,14 +171,22 @@ fn fetch_thumbnail_bytes(
     let stream = wait_async(op).ok()?;
     let size = stream.Size().ok()?;
     if size == 0 || size > 15_000_000 {
+        let _ = stream.Close();
         return None;
     }
     let reader = DataReader::CreateDataReader(&stream).ok()?;
     let load_op = reader.LoadAsync(size as u32).ok()?;
-    wait_async(load_op).ok()?;
+    let _ = wait_async(load_op);
     let mut buf = vec![0u8; size as usize];
-    reader.ReadBytes(&mut buf).ok()?;
-    Some(buf)
+    let res = reader.ReadBytes(&mut buf);
+    // Explicitly close reader and stream to prevent OS memory and handle leaks!
+    let _ = reader.Close();
+    let _ = stream.Close();
+    if res.is_ok() {
+        Some(buf)
+    } else {
+        None
+    }
 }
 
 // =========================================================================
@@ -235,7 +253,7 @@ pub fn get_cached_cover(url: &str) -> Option<Vec<u8>> {
 pub fn save_cached_cover(url: String, bytes: Vec<u8>) {
     if let Ok(mut guard) = COVER_CACHE.lock() {
         let map = guard.get_or_insert_with(std::collections::HashMap::new);
-        if map.len() > 50 {
+        if map.len() > 25 {
             map.clear();
         }
         map.insert(url, bytes);
@@ -457,12 +475,9 @@ pub fn send_media_command(cmd: MediaCommand) {
 
     // 3. Fallback: Dispatch through Windows GSMTC
     thread::spawn(move || {
-        let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-            Ok(op) => match wait_async(op) {
-                Ok(m) => m,
-                Err(_) => return,
-            },
-            Err(_) => return,
+        let manager = match get_media_manager() {
+            Some(m) => m,
+            None => return,
         };
 
         if let Some(session) = get_best_media_session(&manager) {
@@ -557,12 +572,12 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
             // Fast Spotify Desktop inspection for zero-latency sync
             let spotify_win = check_spotify_desktop_window();
 
-            let manager = match GlobalSystemMediaTransportControlsSessionManager::RequestAsync() {
-                Ok(op) => match wait_async(op) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                },
-                Err(_) => continue,
+            let manager = match get_media_manager() {
+                Some(m) => m,
+                None => {
+                    thread::sleep(Duration::from_millis(500));
+                    continue;
+                }
             };
 
             let session = match get_best_media_session(&manager) {
@@ -646,64 +661,75 @@ pub fn start_media_listener(sender: Sender<MediaEvent>) {
                     });
                 }
 
-                if let Ok(prop_op) = session.TryGetMediaPropertiesAsync() {
-                    if let Ok(props) = wait_async(prop_op) {
-                        let mut title = props.Title().map(|h| h.to_string()).unwrap_or_default();
-                        let mut artist = props.Artist().map(|h| h.to_string()).unwrap_or_default();
-                        let album = props.AlbumTitle().map(|h| h.to_string()).unwrap_or_default();
+                // Query WinRT media properties:
+                // 1) Immediately if no track loaded yet (last_title is empty), OR
+                // 2) Spotify desktop window title changed, OR
+                // 3) Periodic throttle: once every ~1s (timeline_tick % 4 == 0).
+                // This eliminates ~75% of redundant TryGetMediaPropertiesAsync calls without missing any track transitions!
+                let should_check_props = last_title.is_empty()
+                    || (is_spotify_session && spotify_win.as_ref().map(|w| !w.2.is_empty() && w.2 != last_title).unwrap_or(false))
+                    || (timeline_tick % 4 == 0);
 
-                        // Fallback to Spotify window title if GSMTC string is temporarily blank
-                        if title.is_empty() && is_spotify_session {
-                            if let Some(ref win) = spotify_win {
-                                if !win.2.is_empty() {
-                                    title = win.2.clone();
-                                    artist = win.1.clone();
+                if should_check_props {
+                    if let Ok(prop_op) = session.TryGetMediaPropertiesAsync() {
+                        if let Ok(props) = wait_async(prop_op) {
+                            let mut title = props.Title().map(|h| h.to_string()).unwrap_or_default();
+                            let mut artist = props.Artist().map(|h| h.to_string()).unwrap_or_default();
+                            let album = props.AlbumTitle().map(|h| h.to_string()).unwrap_or_default();
+
+                            // Fallback to Spotify window title if GSMTC string is temporarily blank
+                            if title.is_empty() && is_spotify_session {
+                                if let Some(ref win) = spotify_win {
+                                    if !win.2.is_empty() {
+                                        title = win.2.clone();
+                                        artist = win.1.clone();
+                                    }
                                 }
                             }
-                        }
 
-                        if !title.is_empty() {
-                            let track_changed = title != last_title || artist != last_artist;
+                            if !title.is_empty() {
+                                let track_changed = title != last_title || artist != last_artist;
 
-                            if track_changed {
-                                last_title = title.clone();
-                                last_artist = artist.clone();
+                                if track_changed {
+                                    last_title = title.clone();
+                                    last_artist = artist.clone();
 
-                                let thumbnail_bytes = fetch_thumbnail_bytes(&props);
-                                current_has_thumbnail = thumbnail_bytes.is_some();
+                                    let thumbnail_bytes = fetch_thumbnail_bytes(&props);
+                                    current_has_thumbnail = thumbnail_bytes.is_some();
 
-                                let (app_name, badge_color) = detect_media_service(&raw_source, &title, &artist, &album);
+                                    let (app_name, badge_color) = detect_media_service(&raw_source, &title, &artist, &album);
 
-                                let notif = Notification {
-                                    app_name,
-                                    title: title.clone(),
-                                    body: if artist.is_empty() {
-                                        if !album.is_empty() {
-                                            album
+                                    let notif = Notification {
+                                        app_name,
+                                        title: title.clone(),
+                                        body: if artist.is_empty() {
+                                            if !album.is_empty() {
+                                                album
+                                            } else {
+                                                "Now Playing".to_string()
+                                            }
                                         } else {
-                                            "Now Playing".to_string()
-                                        }
-                                    } else {
-                                        artist.clone()
-                                    },
-                                    time_str: "now".to_string(),
-                                    badge_letter: "M".to_string(),
-                                    badge_color,
-                                    icon_bytes: None,
-                                    aumid: None,
-                                };
+                                            artist.clone()
+                                        },
+                                        time_str: "now".to_string(),
+                                        badge_letter: "M".to_string(),
+                                        badge_color,
+                                        icon_bytes: None,
+                                        aumid: None,
+                                    };
 
-                                let _ = sender.send(MediaEvent::TrackChanged {
-                                    notif,
-                                    thumbnail_bytes,
-                                    position_secs: pos_secs,
-                                    duration_secs: dur_secs,
-                                });
-                            } else if !current_has_thumbnail {
-                                // Thumbnail stream might have arrived slightly after track metadata!
-                                if let Some(bytes) = fetch_thumbnail_bytes(&props) {
-                                    current_has_thumbnail = true;
-                                    let _ = sender.send(MediaEvent::ThumbnailLoaded(bytes));
+                                    let _ = sender.send(MediaEvent::TrackChanged {
+                                        notif,
+                                        thumbnail_bytes,
+                                        position_secs: pos_secs,
+                                        duration_secs: dur_secs,
+                                    });
+                                } else if !current_has_thumbnail {
+                                    // Thumbnail stream might have arrived slightly after track metadata!
+                                    if let Some(bytes) = fetch_thumbnail_bytes(&props) {
+                                        current_has_thumbnail = true;
+                                        let _ = sender.send(MediaEvent::ThumbnailLoaded(bytes));
+                                    }
                                 }
                             }
                         }

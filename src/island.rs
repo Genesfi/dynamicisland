@@ -295,7 +295,8 @@ impl Island {
             return;
         }
         self.active_candidate_idx = (self.active_candidate_idx + 1) % self.lyrics_candidates.len();
-        let selected = self.lyrics_candidates[self.active_candidate_idx].clone();
+        let mut selected = self.lyrics_candidates[self.active_candidate_idx].clone();
+        selected.ensure_romanized();
 
         // Save selected candidate to disk cache so it persists
         if let Some(dir) = crate::lyrics::get_lyrics_dir() {

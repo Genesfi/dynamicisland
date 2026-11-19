@@ -206,9 +206,16 @@ fn extract_logo_bytes(user_notif: &UserNotification) -> Option<Vec<u8>> {
         thread::sleep(Duration::from_millis(10));
     }
     let _ = load_op.GetResults().ok()?;
+    let _ = load_info.Close();
     let mut bytes = vec![0u8; stream_len];
-    reader.ReadBytes(&mut bytes).ok()?;
-    Some(bytes)
+    let res = reader.ReadBytes(&mut bytes);
+    let _ = reader.Close();
+    let _ = stream.Close();
+    if res.is_ok() {
+        Some(bytes)
+    } else {
+        None
+    }
 }
 
 /// Helper to wait on WinRT async operations synchronously on a background thread.
@@ -219,7 +226,9 @@ fn wait_async<T: RuntimeType + 'static>(
     while info.Status()? == windows_future::AsyncStatus::Started {
         thread::sleep(Duration::from_millis(20));
     }
-    op.GetResults()
+    let res = op.GetResults();
+    let _ = info.Close();
+    res
 }
 
 /// Spawns a background thread listening strictly for REAL Windows notifications.
@@ -306,6 +315,10 @@ pub fn start_notification_listener(sender: Sender<Notification>) {
         // 3. Fallback Polling Loop (checks every 500ms)
         loop {
             thread::sleep(Duration::from_millis(500));
+
+            if seen_ids.len() > 500 {
+                seen_ids.clear();
+            }
 
             if let Ok(async_op) = listener.GetNotificationsAsync(NotificationKinds::Toast) {
                 if let Ok(notifs) = wait_async(async_op) {
